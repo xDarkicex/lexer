@@ -255,6 +255,12 @@ func (p *Parser) parseTableExpr() (NodeRef, error) {
 			End:   p.curr.End,
 		}
 		p.advance()
+		// Optional alias: FROM services s
+		if p.curr.Kind == lexer.KindIdentifier {
+			t.Alias = p.curr.Start
+			t.AliasEnd = p.curr.End
+			p.advance()
+		}
 		p.doc.TableExprs = append(p.doc.TableExprs, t)
 		return NodeRef{Kind: NodeKindTableExpr, ID: t.ID}, nil
 	}
@@ -313,6 +319,16 @@ func (p *Parser) parseMatchPath() (NodeRef, error) {
 				v.AliasEnd = p.curr.End
 				p.advance()
 			}
+			if p.curr.Kind == lexer.KindColon {
+				p.advance()
+				if p.curr.Kind == lexer.KindIdentifier {
+					v.LabelStart = p.curr.Start
+					v.LabelEnd = p.curr.End
+					p.advance()
+				} else {
+					return NodeRef{}, fmt.Errorf("expected vertex label after colon")
+				}
+			}
 			if err := p.expect(lexer.KindRightParen); err != nil {
 				return NodeRef{}, err
 			}
@@ -345,6 +361,42 @@ func (p *Parser) parseMatchPath() (NodeRef, error) {
 					e.AliasEnd = p.curr.End
 					p.advance()
 				}
+				if p.curr.Kind == lexer.KindColon {
+					p.advance()
+					if p.curr.Kind == lexer.KindIdentifier {
+						e.TypeStart = p.curr.Start
+						e.TypeEnd = p.curr.End
+						p.advance()
+					} else {
+						return NodeRef{}, fmt.Errorf("expected edge type after colon")
+					}
+				}
+				// Quantifier inside bracket: [e*1..3] or [e:TYPE*1..3]
+				if p.curr.Kind == lexer.KindAsterisk || p.curr.Kind == lexer.KindPlus || p.curr.Kind == lexer.KindLeftBrace {
+					switch p.curr.Kind {
+					case lexer.KindLeftBrace:
+						p.advance()
+						e.QuantMin = p.parseUint16()
+						p.expect(lexer.KindComma)
+						e.QuantMax = p.parseUint16()
+						p.expect(lexer.KindRightBrace)
+					case lexer.KindPlus:
+						e.QuantMin = 1
+						e.QuantMax = QuantUnbounded
+						p.advance()
+					case lexer.KindAsterisk:
+						p.advance()
+						if p.curr.Kind == lexer.KindNumber {
+							e.QuantMin = p.parseUint16()
+							p.expect(lexer.KindDot)
+							p.expect(lexer.KindDot)
+							e.QuantMax = p.parseUint16()
+						} else {
+							e.QuantMin = 0
+							e.QuantMax = QuantUnbounded
+						}
+					}
+				}
 				if err := p.expect(lexer.KindRightBracket); err != nil {
 					return NodeRef{}, err
 				}
@@ -372,9 +424,20 @@ func (p *Parser) parseMatchPath() (NodeRef, error) {
 				e.QuantMax = QuantUnbounded
 				p.advance()
 			case lexer.KindAsterisk:
-				e.QuantMin = 0
-				e.QuantMax = QuantUnbounded
 				p.advance()
+				if p.curr.Kind == lexer.KindNumber {
+					e.QuantMin = p.parseUint16()
+					if err := p.expect(lexer.KindDot); err != nil {
+						return NodeRef{}, err
+					}
+					if err := p.expect(lexer.KindDot); err != nil {
+						return NodeRef{}, err
+					}
+					e.QuantMax = p.parseUint16()
+				} else {
+					e.QuantMin = 0
+					e.QuantMax = QuantUnbounded
+				}
 			}
 			p.doc.Edges = append(p.doc.Edges, e)
 			p.doc.Nodes = append(p.doc.Nodes, NodeRef{Kind: NodeKindEdge, ID: e.ID})
@@ -403,12 +466,15 @@ func (p *Parser) parseExpr(precedence int) (NodeRef, error) {
 		p.doc.Identifiers = append(p.doc.Identifiers, id)
 		p.advance()
 		
-		// Peek for dot property access e.g., a.vec
+		// Peek for dot property access e.g., a.vec — capture the qualifier so
+		// the binder can resolve s.owner_id against the FROM alias s.
 		if p.curr.Kind == lexer.KindDot {
 			p.advance() // dot
 			if p.curr.Kind == lexer.KindIdentifier {
-				// For AST simplicity, combine into a single identifier or binary expr.
-				// Here we just advance to consume for the benchmark.
+				id.QualStart = id.Start
+				id.QualEnd = id.End
+				id.Start = p.curr.Start
+				id.End = p.curr.End
 				p.advance()
 			}
 		}
@@ -723,12 +789,13 @@ func (p *Parser) parseInsertStmt() error {
 		p.expect(lexer.KindRightParen)
 	}
 
-	// VALUES (val1, val2)
+	// VALUES (val1, val2), (val3, val4), ...
 	if p.curr.Kind == lexer.KindValues {
 		p.advance()
 	}
-	if p.curr.Kind == lexer.KindLeftParen {
-		p.advance()
+	// Parse one or more tuple groups: (a, b, c), (d, e, f), ...
+	for p.curr.Kind == lexer.KindLeftParen {
+		p.advance() // consume '('
 		for p.curr.Kind != lexer.KindRightParen && p.curr.Kind != lexer.KindEOF {
 			switch p.curr.Kind {
 			case lexer.KindString:
@@ -749,6 +816,10 @@ func (p *Parser) parseInsertStmt() error {
 			}
 		}
 		p.expect(lexer.KindRightParen)
+		// Skip any comma separating this tuple from the next
+		if p.curr.Kind == lexer.KindComma {
+			p.advance()
+		}
 	}
 
 	p.doc.InsertStmts = append(p.doc.InsertStmts, stmt)
@@ -1130,6 +1201,27 @@ func (p *Parser) parseJoinClause() (JoinClause, error) {
 	// Now expect JOIN keyword
 	if p.curr.Kind == lexer.KindJoin {
 		p.advance() // consume JOIN
+	}
+
+	// Graph join: JOIN MATCH (a)-[e]->(b)
+	// No table name — the join is defined entirely by the match path.
+	if p.curr.Kind == lexer.KindMatch {
+		p.advance()
+		matchRef, err := p.parseMatchPath()
+		if err != nil {
+			return JoinClause{}, err
+		}
+		jc.MatchPath = matchRef
+		// Optional ON clause after the match path: JOIN MATCH (...) ON s.id = x.id
+		if p.curr.Kind == lexer.KindOn {
+			p.advance()
+			onRef, err := p.parseExpr(0)
+			if err != nil {
+				return JoinClause{}, err
+			}
+			jc.OnExpr = onRef
+		}
+		return jc, nil
 	}
 
 	if p.curr.Kind == lexer.KindIdentifier {

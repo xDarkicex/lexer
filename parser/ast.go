@@ -87,13 +87,14 @@ const (
 	JoinCross
 )
 
-// JoinClause represents a JOIN ... ON clause.
+// JoinClause represents a JOIN ... ON clause, or a JOIN MATCH graph join.
 type JoinClause struct {
 	TableStart uint32
 	TableEnd   uint32
 	Alias      uint32 // offset to alias, 0 if none
 	AliasEnd   uint32
 	OnExpr     NodeRef
+	MatchPath  NodeRef // graph join: JOIN MATCH (a)-[e]->(b); zero value if not a graph join
 	Type       JoinType // INNER (default), LEFT, RIGHT, FULL, CROSS
 }
 
@@ -149,6 +150,8 @@ type TableExpr struct {
 	ID       int32
 	Start    uint32
 	End      uint32
+	Alias    uint32 // Offset to alias (e.g., 's' in FROM services s), 0 if none
+	AliasEnd uint32
 	TableOID uint32 // Resolved at bind time
 }
 
@@ -170,18 +173,22 @@ type MatchPath struct {
 	PathNodesCount int32
 }
 
-// Vertex represents a node in a MATCH path (e.g. `(a)`).
+// Vertex represents a node in a MATCH path (e.g. `(a)` or `(a:Label)`).
 type Vertex struct {
 	ID       int32
 	Alias    uint32 // Offset to alias (e.g., 'a' in (a))
 	AliasEnd uint32
+	LabelStart uint32 // Offset to label identifier (e.g., 'Label' in (a:Label)), 0 if no label
+	LabelEnd   uint32
 }
 
-// Edge represents -[e]- or -> graph connections.
+// Edge represents -[e]- or -> graph connections, with optional type annotation.
 type Edge struct {
 	ID        int32
 	Alias     uint32 // Offset to alias (e.g., 'e' in -[e]->)
 	AliasEnd  uint32
+	TypeStart uint32 // Offset to edge type identifier (e.g., 'KNOWS' in [e:KNOWS]), 0 if no type
+	TypeEnd   uint32
 	Direction int8   // -1: left, 0: undirected, 1: right
 
 	// Path quantifier: controls hop count for multi-hop traversals.
@@ -189,6 +196,7 @@ type Edge struct {
 	// ->+ : QuantMin=1, QuantMax=QuantUnbounded → 1 or more hops.
 	// ->* : QuantMin=0, QuantMax=QuantUnbounded → 0 or more hops.
 	// {min,max}: QuantMin=min, QuantMax=max → between min and max hops.
+	// *min..max: QuantMin=min, QuantMax=max (asterisk-range form).
 	QuantMin uint16
 	QuantMax uint16
 }
@@ -239,6 +247,8 @@ type Identifier struct {
 	ID           int32
 	Start        uint32
 	End          uint32
+	QualStart    uint32 // Offset to qualifier alias (e.g., 's' in s.owner_id), 0 if none
+	QualEnd      uint32
 	TableOID     uint32 // Resolved at bind time
 	ColumnOID    uint32 // Resolved at bind time
 	ResolvedKind uint8  // ResolvedKindTable, ResolvedKindColumn, etc.

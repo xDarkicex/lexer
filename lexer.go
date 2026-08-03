@@ -123,6 +123,8 @@ const (
 	KindCheck       // CHECK
 	KindIf          // IF
 	KindExists      // EXISTS
+
+	KindColon // :
 )
 
 // Token is a single lexer emission (iterator pattern).
@@ -281,13 +283,17 @@ func (s *Scanner) Next() (Token, bool) {
 			s.pos++ // consume closing quote
 		}
 		return Token{Start: start, End: s.pos, Kind: KindString}, true
+
+	case ':':
+		s.pos++
+		return Token{Start: start, End: s.pos, Kind: KindColon}, true
 	}
 
 	// 3. Numbers
 	if c >= '0' && c <= '9' {
 		for int(s.pos) < len(s.src) {
 			b := s.src[s.pos]
-			if (b >= '0' && b <= '9') || b == '.' {
+			if (b >= '0' && b <= '9') || (b == '.' && !(int(s.pos+1) < len(s.src) && s.src[s.pos+1] == '.')) {
 				s.pos++
 			} else {
 				break

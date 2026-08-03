@@ -45,6 +45,30 @@ func TestParseSQL(t *testing.T) {
 			name:  "INSERT",
 			input: "INSERT INTO users (id, name) VALUES ('42', 'alice')",
 		},
+		{
+			name:  "PGQ vertex label",
+			input: "SELECT id FROM GRAPH_TABLE(g MATCH (a:Person)-[e]->(b))",
+		},
+		{
+			name:  "PGQ edge type",
+			input: "SELECT id FROM GRAPH_TABLE(g MATCH (a)-[e:KNOWS]->(b))",
+		},
+		{
+			name:  "PGQ asterisk-range",
+			input: "SELECT id FROM GRAPH_TABLE(g MATCH (a)-[e*1..3]->(b))",
+		},
+		{
+			name:  "PGQ full labels+types+quantifier",
+			input: "SELECT id FROM GRAPH_TABLE(g MATCH (a:Service)-[e:DEPENDS_ON*1..3]->(api:Endpoint)-[:DOCUMENTED_BY]->(doc:Manual))",
+		},
+		{
+			name:  "JOIN MATCH graph join",
+			input: "SELECT doc.id FROM services s JOIN MATCH (s)-[:DEPENDS_ON*1..3]->(api:Endpoint)-[:DOCUMENTED_BY]->(doc:Manual)",
+		},
+		{
+			name:  "JOIN MATCH with FROM alias + qualified ON",
+			input: "SELECT s.id FROM services s JOIN MATCH (s)-[:DEPENDS_ON]->(x) ON s.owner_id = x.owner_id",
+		},
 	}
 
 	for _, tt := range tests {
@@ -82,6 +106,7 @@ func TestParseMatchPathQuantifiers(t *testing.T) {
 		{"one-or-more ->+", "(a)-[e]->+(b)", 1, QuantUnbounded},
 		{"zero-or-more ->*", "(a)-[e]->*(b)", 0, QuantUnbounded},
 		{"range {1,3}", "(a)-[e]->{1,3}(b)", 1, 3},
+		{"asterisk-range *1..3", "(a)-[e]->*1..3(b)", 1, 3},
 	}
 
 	for _, tt := range tests {
@@ -108,3 +133,71 @@ func TestParseMatchPathQuantifiers(t *testing.T) {
 	}
 }
 
+
+func TestParseMatchPathLabels(t *testing.T) {
+	// Each test specifies a vertex pattern and an edge pattern.
+	// The framework builds: GRAPH_TABLE(g MATCH <vertex>-<edge>->(b))
+	tests := []struct {
+		name       string
+		vertex     string
+		edge       string
+		wantAlias  string
+		wantLabel  string // vertex label or edge type
+		isEdge     bool
+	}{
+		{"vertex label with alias", "(a:Person)", "[e]", "a", "Person", false},
+		{"vertex label no alias", "(:Person)", "[e]", "", "Person", false},
+		{"edge type with alias", "(a)", "[e:KNOWS]", "e", "KNOWS", true},
+		{"edge type no alias", "(a)", "[:KNOWS]", "", "KNOWS", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := []byte("SELECT id FROM GRAPH_TABLE(g MATCH " + tt.vertex + "-" + tt.edge + "->(b))")
+			var doc QueryDoc
+			if err := Parse(src, &doc); err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			gt := &doc.GraphTables[0]
+			mp := &doc.MatchPaths[gt.MatchPath.ID]
+
+			if tt.isEdge {
+				edgeRef := doc.Nodes[mp.PathNodesStart+1]
+				if edgeRef.Kind != NodeKindEdge {
+					t.Fatalf("expected Edge at index 1, got %v", edgeRef.Kind)
+				}
+				e := &doc.Edges[edgeRef.ID]
+				alias := string(src[e.Alias:e.AliasEnd])
+				if alias != tt.wantAlias {
+					t.Errorf("alias: want %q, got %q", tt.wantAlias, alias)
+				}
+				if e.TypeStart != e.TypeEnd {
+					typ := string(src[e.TypeStart:e.TypeEnd])
+					if typ != tt.wantLabel {
+						t.Errorf("type: want %q, got %q", tt.wantLabel, typ)
+					}
+				} else if tt.wantLabel != "" {
+					t.Errorf("expected type %q, got none", tt.wantLabel)
+				}
+			} else {
+				vRef := doc.Nodes[mp.PathNodesStart]
+				if vRef.Kind != NodeKindVertex {
+					t.Fatalf("expected Vertex at index 0, got %v", vRef.Kind)
+				}
+				v := &doc.Vertexes[vRef.ID]
+				alias := string(src[v.Alias:v.AliasEnd])
+				if alias != tt.wantAlias {
+					t.Errorf("alias: want %q, got %q", tt.wantAlias, alias)
+				}
+				if v.LabelStart != v.LabelEnd {
+					label := string(src[v.LabelStart:v.LabelEnd])
+					if label != tt.wantLabel {
+						t.Errorf("label: want %q, got %q", tt.wantLabel, label)
+					}
+				} else if tt.wantLabel != "" {
+					t.Errorf("expected label %q, got none", tt.wantLabel)
+				}
+			}
+		})
+	}
+}
