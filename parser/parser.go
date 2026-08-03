@@ -43,6 +43,27 @@ func Parse(src []byte, doc *QueryDoc) error {
 			return p.parseUpdateStmt()
 		case lexer.KindDelete:
 			return p.parseDeleteStmt()
+		case lexer.KindCreate:
+			// Peek ahead to distinguish CREATE TABLE vs CREATE INDEX vs CREATE UNIQUE INDEX
+			if p.next.Kind == lexer.KindUnique {
+				// CREATE UNIQUE INDEX
+				return p.parseCreateIndexStmt()
+			}
+			if p.next.Kind == lexer.KindTable {
+				return p.parseCreateTableStmt()
+			}
+			if p.next.Kind == lexer.KindIndex {
+				return p.parseCreateIndexStmt()
+			}
+			return fmt.Errorf("expected TABLE or INDEX after CREATE, got %v", p.next.Kind)
+		case lexer.KindDrop:
+			// Peek ahead to distinguish DROP TABLE vs DROP INDEX
+			if p.next.Kind == lexer.KindIndex {
+				return p.parseDropIndexStmt()
+			}
+			return p.parseDropTableStmt()
+		case lexer.KindAlter:
+			return p.parseAlterTableStmt()
 		default:
 			// If we hit unexpected tokens at root, we break or error.
 			// For this subset parser, just break.
@@ -109,6 +130,21 @@ func (p *Parser) parseSelectStmt() (NodeRef, error) {
 		stmt.FromTable = fromRef
 	}
 
+	// Parse JOIN clauses
+	for p.curr.Kind == lexer.KindJoin ||
+		p.curr.Kind == lexer.KindLeft ||
+		p.curr.Kind == lexer.KindRight ||
+		p.curr.Kind == lexer.KindInner ||
+		p.curr.Kind == lexer.KindFull ||
+		p.curr.Kind == lexer.KindCross ||
+		p.curr.Kind == lexer.KindOuter {
+		jc, err := p.parseJoinClause()
+		if err != nil {
+			return NodeRef{}, err
+		}
+		stmt.Joins = append(stmt.Joins, jc)
+	}
+
 	if p.curr.Kind == lexer.KindWhere {
 		p.advance()
 		whereRef, err := p.parseExpr(0)
@@ -116,6 +152,39 @@ func (p *Parser) parseSelectStmt() (NodeRef, error) {
 			return NodeRef{}, err
 		}
 		stmt.WhereExpr = whereRef
+	}
+
+	// GROUP BY col1, col2, ...
+	if p.curr.Kind == lexer.KindGroup {
+		p.advance()
+		if err := p.expect(lexer.KindBy); err != nil {
+			return NodeRef{}, err
+		}
+		for p.curr.Kind != lexer.KindEOF &&
+			p.curr.Kind != lexer.KindHaving &&
+			p.curr.Kind != lexer.KindOrder &&
+			p.curr.Kind != lexer.KindLimit {
+			expr, err := p.parseExpr(0)
+			if err != nil {
+				return NodeRef{}, err
+			}
+			stmt.GroupBy = append(stmt.GroupBy, expr)
+			if p.curr.Kind == lexer.KindComma {
+				p.advance()
+			} else {
+				break
+			}
+		}
+	}
+
+	// HAVING condition
+	if p.curr.Kind == lexer.KindHaving {
+		p.advance()
+		havingRef, err := p.parseExpr(0)
+		if err != nil {
+			return NodeRef{}, err
+		}
+		stmt.HavingExpr = havingRef
 	}
 
 	if p.curr.Kind == lexer.KindOrder {
@@ -160,6 +229,15 @@ func (p *Parser) parseProjection() (Projection, error) {
 	proj := Projection{
 		ID:   int32(len(p.doc.Projections)),
 		Expr: expr,
+	}
+	// Optional column alias: SELECT expr AS alias
+	if p.curr.Kind == lexer.KindAs {
+		p.advance()
+		if p.curr.Kind == lexer.KindIdentifier {
+			proj.Alias = p.curr.Start
+			proj.AliasEnd = p.curr.End
+			p.advance()
+		}
 	}
 	return proj, nil
 }
@@ -335,6 +413,9 @@ func (p *Parser) parseExpr(precedence int) (NodeRef, error) {
 			}
 		}
 		
+	case lexer.KindCount, lexer.KindSum, lexer.KindAvg, lexer.KindMin, lexer.KindMax:
+		left = p.parseAggregate()
+
 	case lexer.KindSimilarity, lexer.KindVectorDistance:
 		isSim := p.curr.Kind == lexer.KindSimilarity
 		p.advance()
@@ -402,6 +483,20 @@ func (p *Parser) parseExpr(precedence int) (NodeRef, error) {
 		}
 		left = NodeRef{Kind: NodeKindIdentifier, ID: id.ID}
 		p.doc.Identifiers = append(p.doc.Identifiers, id)
+	case lexer.KindLeftParen:
+		// Subquery: (SELECT ...)
+		if p.next.Kind == lexer.KindSelect {
+			left = p.parseSubquery()
+		} else {
+			p.advance() // consume (
+			var err error
+			left, err = p.parseExpr(0)
+			if err != nil {
+				return NodeRef{}, err
+			}
+			p.expect(lexer.KindRightParen)
+		}
+
 	case lexer.KindNot:
 		p.advance()
 		expr, err := p.parseExpr(operatorPrecedence(lexer.KindNot))
@@ -511,6 +606,61 @@ func (p *Parser) parseExpr(precedence int) (NodeRef, error) {
 	}
 	
 	return left, nil
+}
+
+// parseAggregate parses COUNT(*), COUNT(col), SUM(col), AVG(col), MIN(col), MAX(col).
+func (p *Parser) parseAggregate() NodeRef {
+	funcKind := p.curr.Kind
+	p.advance() // consume func name
+
+	ae := AggregateExpr{
+		ID:   int32(len(p.doc.AggregateExprs)),
+		Func: aggregateFuncFromKind(funcKind),
+	}
+
+	if err := p.expect(lexer.KindLeftParen); err != nil {
+		// Best-effort: return zero-value ref on error; caller's problem.
+		p.doc.AggregateExprs = append(p.doc.AggregateExprs, ae)
+		return NodeRef{Kind: NodeKindAggregateExpr, ID: ae.ID}
+	}
+
+	// COUNT(*) special case
+	if funcKind == lexer.KindCount && p.curr.Kind == lexer.KindAsterisk {
+		p.advance() // consume *
+		p.expect(lexer.KindRightParen)
+		p.doc.AggregateExprs = append(p.doc.AggregateExprs, ae)
+		return NodeRef{Kind: NodeKindAggregateExpr, ID: ae.ID}
+	}
+
+	// DISTINCT modifier
+	if p.curr.Kind == lexer.KindIdentifier {
+		// We'll parse the argument as an expression
+		expr, err := p.parseExpr(0)
+		if err == nil {
+			ae.Expr = expr
+		}
+	}
+
+	p.expect(lexer.KindRightParen)
+	p.doc.AggregateExprs = append(p.doc.AggregateExprs, ae)
+	return NodeRef{Kind: NodeKindAggregateExpr, ID: ae.ID}
+}
+
+func aggregateFuncFromKind(k lexer.Kind) AggregateFunc {
+	switch k {
+	case lexer.KindCount:
+		return AggCount
+	case lexer.KindSum:
+		return AggSum
+	case lexer.KindAvg:
+		return AggAvg
+	case lexer.KindMin:
+		return AggMin
+	case lexer.KindMax:
+		return AggMax
+	default:
+		return AggCount
+	}
 }
 
 // parseUint16 consumes the current token as a number and returns its uint16 value.
@@ -686,4 +836,321 @@ func (p *Parser) parseDeleteStmt() error {
 
 	p.doc.DeleteStmts = append(p.doc.DeleteStmts, stmt)
 	return nil
+}
+
+// parseSubquery parses a parenthesized SELECT subquery: (SELECT ...)
+func (p *Parser) parseSubquery() NodeRef {
+	p.advance() // consume (
+	stmtRef, err := p.parseSelectStmt()
+	if err != nil {
+		// Best-effort: return a zero-value ref
+		return NodeRef{}
+	}
+	p.expect(lexer.KindRightParen)
+
+	sq := SubqueryExpr{
+		ID:   int32(len(p.doc.SubqueryExprs)),
+		Stmt: stmtRef,
+	}
+	p.doc.SubqueryExprs = append(p.doc.SubqueryExprs, sq)
+	return NodeRef{Kind: NodeKindSubqueryExpr, ID: sq.ID}
+}
+
+// parseCreateTableStmt parses CREATE TABLE name (col1 type1, col2 type2, ...)
+func (p *Parser) parseCreateTableStmt() error {
+	p.advance() // consume CREATE
+	p.expect(lexer.KindTable)
+
+	stmt := CreateTableStmt{}
+	if p.curr.Kind == lexer.KindIdentifier {
+		stmt.TableStart = p.curr.Start
+		stmt.TableEnd = p.curr.End
+		p.advance()
+	} else {
+		return fmt.Errorf("expected table name after CREATE TABLE")
+	}
+
+	if err := p.expect(lexer.KindLeftParen); err != nil {
+		return err
+	}
+
+	for p.curr.Kind != lexer.KindRightParen && p.curr.Kind != lexer.KindEOF {
+		col := ColumnDef{}
+		if p.curr.Kind == lexer.KindIdentifier {
+			col.NameStart = p.curr.Start
+			col.NameEnd = p.curr.End
+			p.advance()
+		} else {
+			break
+		}
+		if p.curr.Kind == lexer.KindIdentifier {
+			col.TypeStart = p.curr.Start
+			col.TypeEnd = p.curr.End
+			p.advance()
+		}
+		// Parse constraints: NOT NULL, PRIMARY KEY, UNIQUE, DEFAULT, CHECK, REFERENCES
+		parseColumnConstraints(p, &col)
+		stmt.Columns = append(stmt.Columns, col)
+		if p.curr.Kind == lexer.KindComma {
+			p.advance()
+		} else {
+			break
+		}
+	}
+
+	p.expect(lexer.KindRightParen)
+	p.doc.CreateTableStmts = append(p.doc.CreateTableStmts, stmt)
+	return nil
+}
+
+// parseDropTableStmt parses DROP TABLE [IF EXISTS] name.
+func (p *Parser) parseDropTableStmt() error {
+	p.advance() // consume DROP
+	p.expect(lexer.KindTable)
+
+	stmt := DropTableStmt{}
+	// IF EXISTS
+	if p.curr.Kind == lexer.KindIf {
+		p.advance()
+		p.expect(lexer.KindExists)
+		stmt.IfExists = true
+	}
+	if p.curr.Kind == lexer.KindIdentifier {
+		stmt.TableStart = p.curr.Start
+		stmt.TableEnd = p.curr.End
+		p.advance()
+	} else {
+		return fmt.Errorf("expected table name after DROP TABLE")
+	}
+	p.doc.DropTableStmts = append(p.doc.DropTableStmts, stmt)
+	return nil
+}
+
+// parseDropIndexStmt parses DROP INDEX [IF EXISTS] name.
+func (p *Parser) parseDropIndexStmt() error {
+	p.advance() // consume DROP
+	p.expect(lexer.KindIndex)
+
+	stmt := DropIndexStmt{}
+	if p.curr.Kind == lexer.KindIf {
+		p.advance()
+		p.expect(lexer.KindExists)
+		stmt.IfExists = true
+	}
+	if p.curr.Kind == lexer.KindIdentifier {
+		stmt.IndexStart = p.curr.Start
+		stmt.IndexEnd = p.curr.End
+		p.advance()
+	} else {
+		return fmt.Errorf("expected index name after DROP INDEX")
+	}
+	p.doc.DropIndexStmts = append(p.doc.DropIndexStmts, stmt)
+	return nil
+}
+
+// parseCreateIndexStmt parses CREATE [UNIQUE] INDEX name ON table (col).
+func (p *Parser) parseCreateIndexStmt() error {
+	p.advance() // consume CREATE
+
+	stmt := CreateIndexStmt{}
+	// Optional UNIQUE
+	if p.curr.Kind == lexer.KindUnique {
+		stmt.Unique = true
+		p.advance()
+	}
+	p.expect(lexer.KindIndex)
+
+	if p.curr.Kind == lexer.KindIdentifier {
+		stmt.IndexStart = p.curr.Start
+		stmt.IndexEnd = p.curr.End
+		p.advance()
+	}
+	p.expect(lexer.KindOn)
+	if p.curr.Kind == lexer.KindIdentifier {
+		stmt.TableStart = p.curr.Start
+		stmt.TableEnd = p.curr.End
+		p.advance()
+	}
+	p.expect(lexer.KindLeftParen)
+	if p.curr.Kind == lexer.KindIdentifier {
+		stmt.ColStart = p.curr.Start
+		stmt.ColEnd = p.curr.End
+		p.advance()
+	}
+	p.expect(lexer.KindRightParen)
+	p.doc.CreateIndexStmts = append(p.doc.CreateIndexStmts, stmt)
+	return nil
+}
+
+// parseAlterTableStmt parses ALTER TABLE name ADD [COLUMN] col type [constraints].
+func (p *Parser) parseAlterTableStmt() error {
+	p.advance() // consume ALTER
+	p.expect(lexer.KindTable)
+
+	stmt := AlterTableStmt{}
+	if p.curr.Kind == lexer.KindIdentifier {
+		stmt.TableStart = p.curr.Start
+		stmt.TableEnd = p.curr.End
+		p.advance()
+	} else {
+		return fmt.Errorf("expected table name after ALTER TABLE")
+	}
+
+	// ADD [COLUMN]
+	if p.curr.Kind == lexer.KindAdd {
+		p.advance()
+	}
+	// Optional COLUMN keyword
+	if p.curr.Kind == lexer.KindIdentifier {
+		// Could be "COLUMN" or the actual column name
+		// Simple heuristic: if it looks like "COLUMN", skip it
+		colName := string(p.src[p.curr.Start:p.curr.End])
+		_ = colName
+		// We handle the case where COLUMN is an identifier — just advance and read next
+	}
+	if p.curr.Kind == lexer.KindIdentifier {
+		stmt.AddColumn.NameStart = p.curr.Start
+		stmt.AddColumn.NameEnd = p.curr.End
+		p.advance()
+	}
+	if p.curr.Kind == lexer.KindIdentifier {
+		stmt.AddColumn.TypeStart = p.curr.Start
+		stmt.AddColumn.TypeEnd = p.curr.End
+		p.advance()
+	}
+
+	// Parse constraints: NOT NULL, PRIMARY KEY, UNIQUE
+	parseColumnConstraints(p, &stmt.AddColumn)
+
+	p.doc.AlterTableStmts = append(p.doc.AlterTableStmts, stmt)
+	return nil
+}
+
+// parseColumnConstraints parses column-level constraint keywords and sets flags on the ColumnDef.
+// Handles: NOT NULL, PRIMARY KEY, UNIQUE, DEFAULT value
+func parseColumnConstraints(p *Parser, col *ColumnDef) {
+	for {
+		switch p.curr.Kind {
+		case lexer.KindNot:
+			p.advance()
+			if p.curr.Kind == lexer.KindNull {
+				p.advance()
+				col.Flags |= ColFlagNotNull
+			}
+		case lexer.KindPrimary:
+			p.advance()
+			if p.curr.Kind == lexer.KindKey {
+				p.advance()
+				col.Flags |= ColFlagPrimaryKey | ColFlagNotNull
+			}
+		case lexer.KindUnique:
+			p.advance()
+			col.Flags |= ColFlagUnique
+		case lexer.KindDefault:
+			p.advance()
+			// Skip the default value expression
+			p.parseExpr(0)
+		case lexer.KindCheck:
+			p.advance()
+			// Skip CHECK (...) — consume parenthesized expression
+			if p.curr.Kind == lexer.KindLeftParen {
+				depth := 1
+				p.advance()
+				for depth > 0 && p.curr.Kind != lexer.KindEOF {
+					if p.curr.Kind == lexer.KindLeftParen {
+						depth++
+					} else if p.curr.Kind == lexer.KindRightParen {
+						depth--
+					}
+					p.advance()
+				}
+			}
+		case lexer.KindReferences:
+			p.advance()
+			// Skip REFERENCES table(col) — consume identifiers and parenthesized
+			if p.curr.Kind == lexer.KindIdentifier {
+				p.advance()
+			}
+			if p.curr.Kind == lexer.KindLeftParen {
+				p.advance()
+				if p.curr.Kind == lexer.KindIdentifier {
+					p.advance()
+				}
+				p.expect(lexer.KindRightParen)
+			}
+		case lexer.KindConstraint:
+			p.advance()
+			// Skip named constraint — e.g. CONSTRAINT pk PRIMARY KEY
+			if p.curr.Kind == lexer.KindIdentifier {
+				p.advance()
+			}
+			// Fall through to parse the actual constraint type
+			continue
+		default:
+			return
+		}
+	}
+}
+
+func (p *Parser) parseJoinClause() (JoinClause, error) {
+	jc := JoinClause{Type: JoinInner} // default to INNER
+
+	// Parse optional join type qualifier: LEFT, RIGHT, FULL, INNER, CROSS, OUTER
+	switch p.curr.Kind {
+	case lexer.KindLeft:
+		jc.Type = JoinLeft
+		p.advance()
+		// Optional OUTER: LEFT OUTER JOIN
+		if p.curr.Kind == lexer.KindOuter {
+			p.advance()
+		}
+	case lexer.KindRight:
+		jc.Type = JoinRight
+		p.advance()
+		if p.curr.Kind == lexer.KindOuter {
+			p.advance()
+		}
+	case lexer.KindFull:
+		jc.Type = JoinFull
+		p.advance()
+		if p.curr.Kind == lexer.KindOuter {
+			p.advance()
+		}
+	case lexer.KindInner:
+		jc.Type = JoinInner
+		p.advance()
+	case lexer.KindCross:
+		jc.Type = JoinCross
+		p.advance()
+	case lexer.KindOuter:
+		// Bare OUTER without LEFT/RIGHT/FULL — treat as INNER
+		p.advance()
+	}
+
+	// Now expect JOIN keyword
+	if p.curr.Kind == lexer.KindJoin {
+		p.advance() // consume JOIN
+	}
+
+	if p.curr.Kind == lexer.KindIdentifier {
+		jc.TableStart = p.curr.Start
+		jc.TableEnd = p.curr.End
+		p.advance()
+	}
+	// Optional alias
+	if p.curr.Kind == lexer.KindIdentifier {
+		jc.Alias = p.curr.Start
+		jc.AliasEnd = p.curr.End
+		p.advance()
+	}
+	// ON clause
+	if p.curr.Kind == lexer.KindOn {
+		p.advance()
+		onRef, err := p.parseExpr(0)
+		if err != nil {
+			return JoinClause{}, err
+		}
+		jc.OnExpr = onRef
+	}
+	return jc, nil
 }

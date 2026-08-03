@@ -66,6 +66,12 @@ const (
 	KindDesc
 	KindLimit
 	KindJoin
+	KindLeft    // LEFT JOIN
+	KindRight   // RIGHT JOIN
+	KindInner   // INNER JOIN
+	KindOuter   // OUTER (used with LEFT/RIGHT)
+	KindFull    // FULL JOIN
+	KindCross   // CROSS JOIN
 	KindOn
 	KindAs
 	KindBetween
@@ -89,6 +95,34 @@ const (
 	KindUpdate // UPDATE
 	KindSet    // SET
 	KindDelete // DELETE
+
+	// Aggregate Keywords
+	KindCount // COUNT
+	KindSum   // SUM
+	KindAvg   // AVG
+	KindMin   // MIN
+	KindMax   // MAX
+
+	// DDL Keywords
+	KindCreate      // CREATE
+	KindTable       // TABLE
+	KindIndex       // INDEX
+	KindDrop        // DROP
+	KindAlter       // ALTER
+	KindAdd         // ADD
+	KindGroup       // GROUP
+	KindHaving      // HAVING
+	KindPrimary     // PRIMARY
+	KindKey         // KEY
+	KindNull        // NULL
+	KindUnique      // UNIQUE
+	KindDefault     // DEFAULT
+	KindConstraint  // CONSTRAINT
+	KindForeign     // FOREIGN
+	KindReferences  // REFERENCES
+	KindCheck       // CHECK
+	KindIf          // IF
+	KindExists      // EXISTS
 )
 
 // Token is a single lexer emission (iterator pattern).
@@ -275,6 +309,8 @@ func (s *Scanner) Next() (Token, bool) {
 				kind = KindOn
 			} else if caseInsensitiveMatch(s.src[start:start+2], "or") {
 				kind = KindOr
+			} else if caseInsensitiveMatch(s.src[start:start+2], "if") {
+				kind = KindIf
 			}
 		case 3:
 			if caseInsensitiveMatch(s.src[start:start+3], "and") {
@@ -283,6 +319,18 @@ func (s *Scanner) Next() (Token, bool) {
 				kind = KindNot
 			} else if caseInsensitiveMatch(s.src[start:start+3], "set") {
 				kind = KindSet
+			} else if caseInsensitiveMatch(s.src[start:start+3], "sum") {
+				kind = KindSum
+			} else if caseInsensitiveMatch(s.src[start:start+3], "avg") {
+				kind = KindAvg
+			} else if caseInsensitiveMatch(s.src[start:start+3], "min") {
+				kind = KindMin
+			} else if caseInsensitiveMatch(s.src[start:start+3], "max") {
+				kind = KindMax
+			} else if caseInsensitiveMatch(s.src[start:start+3], "add") {
+				kind = KindAdd
+			} else if caseInsensitiveMatch(s.src[start:start+3], "key") {
+				kind = KindKey
 			}
 		case 4:
 			if caseInsensitiveMatch(s.src[start:start+4], "from") {
@@ -293,6 +341,14 @@ func (s *Scanner) Next() (Token, bool) {
 				kind = KindJoin
 			} else if caseInsensitiveMatch(s.src[start:start+4], "desc") {
 				kind = KindDesc
+			} else if caseInsensitiveMatch(s.src[start:start+4], "drop") {
+				kind = KindDrop
+			} else if caseInsensitiveMatch(s.src[start:start+4], "left") {
+				kind = KindLeft
+			} else if caseInsensitiveMatch(s.src[start:start+4], "full") {
+				kind = KindFull
+			} else if caseInsensitiveMatch(s.src[start:start+4], "null") {
+				kind = KindNull
 			}
 		case 5:
 			if caseInsensitiveMatch(s.src[start:start+5], "where") {
@@ -303,6 +359,26 @@ func (s *Scanner) Next() (Token, bool) {
 				kind = KindLimit
 			} else if caseInsensitiveMatch(s.src[start:start+5], "match") {
 				kind = KindMatch
+			} else if caseInsensitiveMatch(s.src[start:start+5], "count") {
+				kind = KindCount
+			} else if caseInsensitiveMatch(s.src[start:start+5], "table") {
+				kind = KindTable
+			} else if caseInsensitiveMatch(s.src[start:start+5], "group") {
+				kind = KindGroup
+			} else if caseInsensitiveMatch(s.src[start:start+5], "index") {
+				kind = KindIndex
+			} else if caseInsensitiveMatch(s.src[start:start+5], "right") {
+				kind = KindRight
+			} else if caseInsensitiveMatch(s.src[start:start+5], "inner") {
+				kind = KindInner
+			} else if caseInsensitiveMatch(s.src[start:start+5], "outer") {
+				kind = KindOuter
+			} else if caseInsensitiveMatch(s.src[start:start+5], "cross") {
+				kind = KindCross
+			} else if caseInsensitiveMatch(s.src[start:start+5], "alter") {
+				kind = KindAlter
+			} else if caseInsensitiveMatch(s.src[start:start+5], "check") {
+				kind = KindCheck
 			}
 		case 6:
 			if caseInsensitiveMatch(s.src[start:start+6], "select") {
@@ -317,14 +393,32 @@ func (s *Scanner) Next() (Token, bool) {
 				kind = KindValues
 			} else if caseInsensitiveMatch(s.src[start:start+6], "vertex") {
 				kind = KindVertex
+			} else if caseInsensitiveMatch(s.src[start:start+6], "having") {
+				kind = KindHaving
+			} else if caseInsensitiveMatch(s.src[start:start+6], "create") {
+				kind = KindCreate
+			} else if caseInsensitiveMatch(s.src[start:start+6], "unique") {
+				kind = KindUnique
+			} else if caseInsensitiveMatch(s.src[start:start+6], "exists") {
+				kind = KindExists
 			}
 		case 7:
 			if caseInsensitiveMatch(s.src[start:start+7], "between") {
 				kind = KindBetween
+			} else if caseInsensitiveMatch(s.src[start:start+7], "primary") {
+				kind = KindPrimary
+			} else if caseInsensitiveMatch(s.src[start:start+7], "default") {
+				kind = KindDefault
+			} else if caseInsensitiveMatch(s.src[start:start+7], "foreign") {
+				kind = KindForeign
 			}
 		case 10:
 			if caseInsensitiveMatch(s.src[start:start+10], "similarity") {
 				kind = KindSimilarity
+			} else if caseInsensitiveMatch(s.src[start:start+10], "constraint") {
+				kind = KindConstraint
+			} else if caseInsensitiveMatch(s.src[start:start+10], "references") {
+				kind = KindReferences
 			}
 		case 11:
 			if caseInsensitiveMatch(s.src[start:start+11], "graph_table") {

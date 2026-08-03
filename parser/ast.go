@@ -20,6 +20,11 @@ const (
 	NodeKindIdentifier
 	NodeKindNumber
 	NodeKindString
+	NodeKindAggregateExpr
+	NodeKindSubqueryExpr
+	NodeKindCreateTableStmt
+	NodeKindDropTableStmt
+	NodeKindCreateIndexStmt
 )
 
 const (
@@ -60,6 +65,36 @@ type QueryDoc struct {
 	InsertStmts []InsertStmt
 	UpdateStmts []UpdateStmt
 	DeleteStmts []DeleteStmt
+
+	// Aggregate / Subquery / DDL
+	AggregateExprs  []AggregateExpr
+	SubqueryExprs   []SubqueryExpr
+	CreateTableStmts  []CreateTableStmt
+	DropTableStmts    []DropTableStmt
+	DropIndexStmts    []DropIndexStmt
+	CreateIndexStmts  []CreateIndexStmt
+	AlterTableStmts   []AlterTableStmt
+}
+
+// JoinType enumerates SQL join variants.
+type JoinType uint8
+
+const (
+	JoinInner JoinType = iota
+	JoinLeft
+	JoinRight
+	JoinFull
+	JoinCross
+)
+
+// JoinClause represents a JOIN ... ON clause.
+type JoinClause struct {
+	TableStart uint32
+	TableEnd   uint32
+	Alias      uint32 // offset to alias, 0 if none
+	AliasEnd   uint32
+	OnExpr     NodeRef
+	Type       JoinType // INNER (default), LEFT, RIGHT, FULL, CROSS
 }
 
 // SelectStmt represents a SELECT query.
@@ -68,9 +103,12 @@ type SelectStmt struct {
 	ProjectionsStart int32   // Index into QueryDoc.Projections
 	ProjectionsCount int32
 	FromTable        NodeRef // Points to TableExpr or GraphTable
+	Joins            []JoinClause
 	WhereExpr        NodeRef // Points to BinaryExpr or VectorFunc, etc.
-	OrderBy          NodeRef // Points to the expression being ordered
-	Limit            int32   // Index to Number node, or -1
+	GroupBy          []NodeRef // GROUP BY column references
+	HavingExpr       NodeRef   // HAVING clause expression
+	OrderBy          NodeRef   // Points to the expression being ordered
+	Limit            int32     // Index to Number node, or -1
 	IsDesc           bool
 }
 
@@ -220,6 +258,86 @@ type StringLiteral struct {
 	End   uint32
 }
 
+// AggregateFunc enumerates supported aggregate functions.
+type AggregateFunc uint8
+
+const (
+	AggCount  AggregateFunc = 0
+	AggSum    AggregateFunc = 1
+	AggAvg    AggregateFunc = 2
+	AggMin    AggregateFunc = 3
+	AggMax    AggregateFunc = 4
+)
+
+// AggregateExpr represents COUNT(*), COUNT(col), SUM(col), AVG(col), MIN(col), MAX(col).
+type AggregateExpr struct {
+	ID       int32
+	Func     AggregateFunc
+	Distinct bool
+	Expr     NodeRef // column reference, or zero-value NodeRef for COUNT(*)
+}
+
+// SubqueryExpr represents a parenthesized SELECT subquery.
+type SubqueryExpr struct {
+	ID   int32
+	Stmt NodeRef // points to a nested SelectStmt
+}
+
+// CreateTableStmt represents CREATE TABLE name (col1 type1, col2 type2, ...).
+type CreateTableStmt struct {
+	TableStart uint32
+	TableEnd   uint32
+	Columns    []ColumnDef
+}
+
+// ColumnFlags bitmask for column constraints.
+const (
+	ColFlagNotNull uint16 = 1 << iota
+	ColFlagPrimaryKey
+	ColFlagUnique
+)
+
+// ColumnDef is a single column definition in CREATE TABLE.
+type ColumnDef struct {
+	NameStart uint32
+	NameEnd   uint32
+	TypeStart uint32
+	TypeEnd   uint32
+	Flags     uint16 // ColFlagNotNull, ColFlagPrimaryKey, ColFlagUnique
+}
+
+// DropTableStmt represents DROP TABLE [IF EXISTS] name.
+type DropTableStmt struct {
+	TableStart uint32
+	TableEnd   uint32
+	IfExists   bool
+}
+
+// DropIndexStmt represents DROP INDEX [IF EXISTS] name.
+type DropIndexStmt struct {
+	IndexStart uint32
+	IndexEnd   uint32
+	IfExists   bool
+}
+
+// CreateIndexStmt represents CREATE INDEX name ON table (col).
+type CreateIndexStmt struct {
+	IndexStart uint32
+	IndexEnd   uint32
+	TableStart uint32
+	TableEnd   uint32
+	ColStart   uint32
+	ColEnd     uint32
+	Unique     bool
+}
+
+// AlterTableStmt represents ALTER TABLE name ADD [COLUMN] col type [constraints].
+type AlterTableStmt struct {
+	TableStart uint32
+	TableEnd   uint32
+	AddColumn  ColumnDef // ADD COLUMN clause
+}
+
 // Reset clears the slices to zero length while retaining capacity.
 // This allows the QueryDoc to be reused across queries with zero allocations.
 func (d *QueryDoc) Reset() {
@@ -242,4 +360,15 @@ func (d *QueryDoc) Reset() {
 	d.InsertStmts = d.InsertStmts[:0]
 	d.UpdateStmts = d.UpdateStmts[:0]
 	d.DeleteStmts = d.DeleteStmts[:0]
+	d.AggregateExprs = d.AggregateExprs[:0]
+	d.SubqueryExprs = d.SubqueryExprs[:0]
+	d.CreateTableStmts = d.CreateTableStmts[:0]
+	d.DropTableStmts = d.DropTableStmts[:0]
+	d.DropIndexStmts = d.DropIndexStmts[:0]
+	d.CreateIndexStmts = d.CreateIndexStmts[:0]
+	d.AlterTableStmts = d.AlterTableStmts[:0]
+	for i := range d.SelectStmts {
+		d.SelectStmts[i].Joins = nil
+		d.SelectStmts[i].GroupBy = nil
+	}
 }
