@@ -161,6 +161,29 @@ func (s *Scanner) Next() (Token, bool) {
 	start := s.pos
 	c := s.src[s.pos]
 
+	// 0. SQL comments — treated as whitespace so the parser skips them.
+	//    Handles both line comments (-- ...) and block comments (/* ... */).
+	if c == '-' && int(s.pos)+1 < len(s.src) && s.src[s.pos+1] == '-' {
+		// Line comment: skip to end of line
+		s.pos += 2
+		for int(s.pos) < len(s.src) && s.src[s.pos] != '\n' {
+			s.pos++
+		}
+		return Token{Start: start, End: s.pos, Kind: KindWhitespace}, true
+	}
+	if c == '/' && int(s.pos)+1 < len(s.src) && s.src[s.pos+1] == '*' {
+		// Block comment: skip to closing */
+		s.pos += 2
+		for int(s.pos)+1 < len(s.src) {
+			if s.src[s.pos] == '*' && s.src[s.pos+1] == '/' {
+				s.pos += 2
+				break
+			}
+			s.pos++
+		}
+		return Token{Start: start, End: s.pos, Kind: KindWhitespace}, true
+	}
+
 	// 1. Whitespace SWAR acceleration
 	if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
 		s.pos++
