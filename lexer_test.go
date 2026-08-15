@@ -40,6 +40,14 @@ func TestScanner(t *testing.T) {
 			},
 		},
 		{
+			name:  "Explicit ascending order",
+			input: "ORDER BY score ASC LIMIT 5",
+			expected: []Kind{
+				KindOrder, KindWhitespace, KindBy, KindWhitespace, KindIdentifier,
+				KindWhitespace, KindAsc, KindWhitespace, KindLimit, KindWhitespace, KindNumber, KindEOF,
+			},
+		},
+		{
 			name:  "Mixed Case Keywords",
 			input: "sEleCt FrOm gRaPh_TaBlE",
 			expected: []Kind{
@@ -52,7 +60,7 @@ func TestScanner(t *testing.T) {
 			expected: []Kind{
 				KindWhere, KindWhitespace, KindIdentifier, KindWhitespace, KindEquals, KindWhitespace,
 				KindString, KindWhitespace, KindAnd, KindWhitespace, KindIdentifier, KindWhitespace,
-			KindGreaterThan, KindWhitespace, KindNumber, KindEOF,
+				KindGreaterThan, KindWhitespace, KindNumber, KindEOF,
 			},
 		},
 		{

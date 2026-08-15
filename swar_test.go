@@ -192,7 +192,7 @@ func TestPropertyFindByte(t *testing.T) {
 		}
 		src := data
 		start := uint32(start16) % uint32(len(src))
-		end := start + uint32(len16)%uint32(len(src)-int(start))+1
+		end := start + uint32(len16)%uint32(len(src)-int(start)) + 1
 		if end > uint32(len(src)) {
 			end = uint32(len(src))
 		}
@@ -217,7 +217,7 @@ func TestPropertyFindByteNot(t *testing.T) {
 		}
 		src := data
 		start := uint32(start16) % uint32(len(src))
-		end := start + uint32(len16)%uint32(len(src)-int(start))+1
+		end := start + uint32(len16)%uint32(len(src)-int(start)) + 1
 		if end > uint32(len(src)) {
 			end = uint32(len(src))
 		}
@@ -361,7 +361,7 @@ func TestPropertyFindAnyByte6(t *testing.T) {
 		}
 		src := data
 		start := uint32(start16) % uint32(len(src))
-		end := start + uint32(len16)%uint32(len(src)-int(start))+1
+		end := start + uint32(len16)%uint32(len(src)-int(start)) + 1
 		if end > uint32(len(src)) {
 			end = uint32(len(src))
 		}
