@@ -667,6 +667,8 @@ func (s *Scanner) Next() (Token, bool) {
 		case 4:
 			if caseInsensitiveMatch(s.src[start:start+4], "from") {
 				kind = KindFrom
+			} else if caseInsensitiveMatch(s.src[start:start+4], "edge") {
+				kind = KindEdge
 			} else if caseInsensitiveMatch(s.src[start:start+4], "into") {
 				kind = KindInto
 			} else if caseInsensitiveMatch(s.src[start:start+4], "join") {

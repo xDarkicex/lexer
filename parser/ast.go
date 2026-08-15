@@ -93,13 +93,14 @@ type QueryDoc struct {
 	DeleteStmts          []DeleteStmt
 
 	// Aggregate / Subquery / DDL
-	AggregateExprs   []AggregateExpr
-	SubqueryExprs    []SubqueryExpr
-	CreateTableStmts []CreateTableStmt
-	DropTableStmts   []DropTableStmt
-	DropIndexStmts   []DropIndexStmt
-	CreateIndexStmts []CreateIndexStmt
-	AlterTableStmts  []AlterTableStmt
+	AggregateExprs      []AggregateExpr
+	SubqueryExprs       []SubqueryExpr
+	CreateTableStmts    []CreateTableStmt
+	CreateEdgeTypeStmts []CreateEdgeTypeStmt
+	DropTableStmts      []DropTableStmt
+	DropIndexStmts      []DropIndexStmt
+	CreateIndexStmts    []CreateIndexStmt
+	AlterTableStmts     []AlterTableStmt
 
 	// ComputeLeidenStmts holds COMPUTE LEIDEN statements.
 	ComputeLeidenStmts  []ComputeLeidenStmt
@@ -723,10 +724,18 @@ type SubqueryExpr struct {
 type CreateTableStmt struct {
 	TableStart       uint32
 	TableEnd         uint32
+	Graph            bool // CREATE GRAPH TABLE; records become graph vertices.
 	Columns          []ColumnDef
 	ForeignKeys      []ForeignKeyConstraint
 	PrimaryKey       *PrimaryKeyConstraint
 	CheckConstraints []CheckConstraint
+}
+
+// CreateEdgeTypeStmt represents CREATE EDGE TYPE name. The database assigns
+// and durably records the numeric graph kind during execution.
+type CreateEdgeTypeStmt struct {
+	NameStart uint32
+	NameEnd   uint32
 }
 
 // CheckConstraint represents a CHECK (...) constraint, either inline on a
@@ -881,6 +890,7 @@ func (d *QueryDoc) Reset() {
 	d.AggregateExprs = d.AggregateExprs[:0]
 	d.SubqueryExprs = d.SubqueryExprs[:0]
 	d.CreateTableStmts = d.CreateTableStmts[:0]
+	d.CreateEdgeTypeStmts = d.CreateEdgeTypeStmts[:0]
 	d.DropTableStmts = d.DropTableStmts[:0]
 	d.DropIndexStmts = d.DropIndexStmts[:0]
 	d.CreateIndexStmts = d.CreateIndexStmts[:0]

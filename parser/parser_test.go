@@ -87,6 +87,39 @@ func TestParseSQL(t *testing.T) {
 	}
 }
 
+func TestParseGraphDDL(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		sql   string
+		graph bool
+		edge  bool
+	}{
+		{name: "graph table", sql: "CREATE GRAPH TABLE users (id TEXT PRIMARY KEY)", graph: true},
+		{name: "edge type", sql: "CREATE EDGE TYPE FOLLOWS", edge: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var doc QueryDoc
+			if err := Parse([]byte(tc.sql), &doc); err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if tc.graph {
+				if len(doc.CreateTableStmts) != 1 || !doc.CreateTableStmts[0].Graph {
+					t.Fatalf("graph DDL AST: %#v", doc.CreateTableStmts)
+				}
+			}
+			if tc.edge {
+				if len(doc.CreateEdgeTypeStmts) != 1 {
+					t.Fatalf("edge DDL AST: %#v", doc.CreateEdgeTypeStmts)
+				}
+				stmt := doc.CreateEdgeTypeStmts[0]
+				if got := tc.sql[stmt.NameStart:stmt.NameEnd]; got != "FOLLOWS" {
+					t.Fatalf("edge name=%q", got)
+				}
+			}
+		})
+	}
+}
+
 func TestParseSelectMultipleOrderTerms(t *testing.T) {
 	var doc QueryDoc
 	if err := Parse([]byte("SELECT id FROM docs ORDER BY distance ASC, id DESC LIMIT 128"), &doc); err != nil {

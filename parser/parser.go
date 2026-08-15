@@ -62,6 +62,12 @@ func Parse(src []byte, doc *QueryDoc) error {
 			if p.next.Kind == lexer.KindTable {
 				return p.parseCreateTableStmt()
 			}
+			if p.next.Kind == lexer.KindEdge {
+				return p.parseCreateEdgeTypeStmt()
+			}
+			if p.next.Kind == lexer.KindIdentifier && bytes.EqualFold(p.src[p.next.Start:p.next.End], []byte("graph")) {
+				return p.parseCreateGraphTableStmt()
+			}
 			if p.next.Kind == lexer.KindIndex {
 				return p.parseCreateIndexStmt()
 			}
@@ -3132,9 +3138,31 @@ func (p *Parser) parseSubquery() NodeRef {
 // and table-level CONSTRAINT / FOREIGN KEY clauses.
 func (p *Parser) parseCreateTableStmt() error {
 	p.advance() // consume CREATE
-	p.expect(lexer.KindTable)
+	if err := p.expect(lexer.KindTable); err != nil {
+		return err
+	}
+	return p.parseCreateTableAfterTable(false)
+}
 
-	stmt := CreateTableStmt{}
+// parseCreateGraphTableStmt parses CREATE GRAPH TABLE. Graph tables use the
+// same relational column/constraint grammar as CREATE TABLE, but execution
+// attaches the existing graph layer to the collection so record inserts
+// create graph vertices through the normal collection machinery.
+func (p *Parser) parseCreateGraphTableStmt() error {
+	p.advance() // consume CREATE; current token is GRAPH
+	if p.curr.Kind != lexer.KindIdentifier || !bytes.EqualFold(p.src[p.curr.Start:p.curr.End], []byte("graph")) {
+		return fmt.Errorf("expected GRAPH after CREATE")
+	}
+	p.advance()
+	if err := p.expect(lexer.KindTable); err != nil {
+		return err
+	}
+	return p.parseCreateTableAfterTable(true)
+}
+
+func (p *Parser) parseCreateTableAfterTable(graph bool) error {
+
+	stmt := CreateTableStmt{Graph: graph}
 	if p.curr.Kind == lexer.KindIdentifier {
 		stmt.TableStart = p.curr.Start
 		stmt.TableEnd = p.curr.End
@@ -3305,6 +3333,28 @@ func (p *Parser) parseCreateTableStmt() error {
 
 	p.expect(lexer.KindRightParen)
 	p.doc.CreateTableStmts = append(p.doc.CreateTableStmts, stmt)
+	return nil
+}
+
+// parseCreateEdgeTypeStmt parses CREATE EDGE TYPE name. TYPE is intentionally
+// accepted as an identifier so the lexer does not need a new keyword; this
+// keeps existing identifier behavior unchanged.
+func (p *Parser) parseCreateEdgeTypeStmt() error {
+	p.advance() // consume CREATE; current token is EDGE
+	if p.curr.Kind != lexer.KindEdge {
+		return fmt.Errorf("expected EDGE after CREATE")
+	}
+	p.advance() // TYPE
+	if p.curr.Kind != lexer.KindIdentifier || !bytes.EqualFold(p.src[p.curr.Start:p.curr.End], []byte("type")) {
+		return fmt.Errorf("expected TYPE after CREATE EDGE")
+	}
+	p.advance() // edge type name
+	if p.curr.Kind != lexer.KindIdentifier {
+		return fmt.Errorf("expected edge type name after CREATE EDGE TYPE")
+	}
+	stmt := CreateEdgeTypeStmt{NameStart: p.curr.Start, NameEnd: p.curr.End}
+	p.advance()
+	p.doc.CreateEdgeTypeStmts = append(p.doc.CreateEdgeTypeStmts, stmt)
 	return nil
 }
 
