@@ -3354,6 +3354,11 @@ func (p *Parser) parseCreateEdgeTypeStmt() error {
 	}
 	stmt := CreateEdgeTypeStmt{NameStart: p.curr.Start, NameEnd: p.curr.End}
 	p.advance()
+	if p.curr.Kind == lexer.KindIdentifier && bytes.EqualFold(p.src[p.curr.Start:p.curr.End], []byte("undirected")) {
+		stmt.Undirected = true
+		stmt.DirectionSpecified = true
+		p.advance()
+	}
 	p.doc.CreateEdgeTypeStmts = append(p.doc.CreateEdgeTypeStmts, stmt)
 	return nil
 }

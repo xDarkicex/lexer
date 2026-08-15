@@ -734,8 +734,10 @@ type CreateTableStmt struct {
 // CreateEdgeTypeStmt represents CREATE EDGE TYPE name. The database assigns
 // and durably records the numeric graph kind during execution.
 type CreateEdgeTypeStmt struct {
-	NameStart uint32
-	NameEnd   uint32
+	NameStart          uint32
+	NameEnd            uint32
+	Undirected         bool
+	DirectionSpecified bool
 }
 
 // CheckConstraint represents a CHECK (...) constraint, either inline on a

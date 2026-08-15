@@ -96,6 +96,7 @@ func TestParseGraphDDL(t *testing.T) {
 	}{
 		{name: "graph table", sql: "CREATE GRAPH TABLE users (id TEXT PRIMARY KEY)", graph: true},
 		{name: "edge type", sql: "CREATE EDGE TYPE FOLLOWS", edge: true},
+		{name: "undirected edge type", sql: "CREATE EDGE TYPE KNOWS UNDIRECTED", edge: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var doc QueryDoc
@@ -112,8 +113,12 @@ func TestParseGraphDDL(t *testing.T) {
 					t.Fatalf("edge DDL AST: %#v", doc.CreateEdgeTypeStmts)
 				}
 				stmt := doc.CreateEdgeTypeStmts[0]
-				if got := tc.sql[stmt.NameStart:stmt.NameEnd]; got != "FOLLOWS" {
+				got := tc.sql[stmt.NameStart:stmt.NameEnd]
+				if tc.name == "edge type" && got != "FOLLOWS" {
 					t.Fatalf("edge name=%q", got)
+				}
+				if tc.name == "undirected edge type" && (!stmt.Undirected || !stmt.DirectionSpecified || got != "KNOWS") {
+					t.Fatalf("undirected edge AST: %#v name=%q", stmt, got)
 				}
 			}
 		})
