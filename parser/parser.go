@@ -35,6 +35,34 @@ func Parse(src []byte, doc *QueryDoc) error {
 
 	for p.curr.Kind != lexer.KindEOF {
 		switch p.curr.Kind {
+		case lexer.KindExplain:
+			doc.Explain = true
+			p.advance()
+			if p.curr.Kind == lexer.KindAnalyze {
+				doc.ExplainAnalyze = true
+				p.advance()
+			}
+			if p.curr.Kind != lexer.KindSelect && p.curr.Kind != lexer.KindWith {
+				return fmt.Errorf("EXPLAIN requires a SELECT query")
+			}
+			doc.ExplainQueryStart = p.curr.Start
+			stmtRef, err := p.parseSelectOrWith()
+			if err != nil {
+				return err
+			}
+			if p.curr.Kind == lexer.KindError && p.curr.Start < uint32(len(src)) && src[p.curr.Start] == ';' {
+				p.advance()
+			}
+			doc.ExplainQueryEnd = uint32(len(src))
+			for doc.ExplainQueryEnd > doc.ExplainQueryStart {
+				last := src[doc.ExplainQueryEnd-1]
+				if last == ';' || last == ' ' || last == '\t' || last == '\r' || last == '\n' {
+					doc.ExplainQueryEnd--
+					continue
+				}
+				break
+			}
+			doc.Nodes = append(doc.Nodes, stmtRef)
 		case lexer.KindWith:
 			stmtRef, err := p.parseWithSelect()
 			if err != nil {
@@ -177,6 +205,13 @@ func Parse(src []byte, doc *QueryDoc) error {
 		}
 	}
 	return nil
+}
+
+func (p *Parser) parseSelectOrWith() (NodeRef, error) {
+	if p.curr.Kind == lexer.KindWith {
+		return p.parseWithSelect()
+	}
+	return p.parseSelectStmt()
 }
 
 // parseSessionSettingStmt parses the session-local controls supported by the

@@ -178,6 +178,8 @@ const (
 	KindCast       // ::
 	KindShiftLeft  // <<
 	KindShiftRight // >>
+	KindExplain    // EXPLAIN
+	KindAnalyze    // ANALYZE
 	KindReset      // RESET
 	KindLike       // LIKE
 	KindILike      // ILIKE
@@ -797,6 +799,10 @@ func (s *Scanner) Next() (Token, bool) {
 				kind = KindPrepare
 			} else if caseInsensitiveMatch(s.src[start:start+7], "execute") {
 				kind = KindExecute
+			} else if caseInsensitiveMatch(s.src[start:start+7], "explain") {
+				kind = KindExplain
+			} else if caseInsensitiveMatch(s.src[start:start+7], "analyze") {
+				kind = KindAnalyze
 			}
 		case 8:
 			if caseInsensitiveMatch(s.src[start:start+8], "rollback") {

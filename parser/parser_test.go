@@ -87,6 +87,23 @@ func TestParseSQL(t *testing.T) {
 	}
 }
 
+func TestParseExplainAnalyzeGraphQuery(t *testing.T) {
+	src := []byte("EXPLAIN ANALYZE SELECT src.id FROM people src JOIN MATCH (src)-[:FOLLOWS]->(tgt) WHERE src.id = $1;")
+	var doc QueryDoc
+	if err := Parse(src, &doc); err != nil {
+		t.Fatalf("Parse EXPLAIN ANALYZE: %v", err)
+	}
+	if !doc.Explain || !doc.ExplainAnalyze {
+		t.Fatalf("explain flags: explain=%v analyze=%v", doc.Explain, doc.ExplainAnalyze)
+	}
+	if doc.ExplainQueryStart >= doc.ExplainQueryEnd || string(src[doc.ExplainQueryStart:doc.ExplainQueryEnd]) != "SELECT src.id FROM people src JOIN MATCH (src)-[:FOLLOWS]->(tgt) WHERE src.id = $1" {
+		t.Fatalf("inner query span=[%d,%d): %q", doc.ExplainQueryStart, doc.ExplainQueryEnd, src[doc.ExplainQueryStart:doc.ExplainQueryEnd])
+	}
+	if len(doc.SelectStmts) != 1 || len(doc.SelectStmts[0].Joins) != 1 || doc.SelectStmts[0].Joins[0].MatchPath.Kind != NodeKindMatchPath {
+		t.Fatalf("graph AST was not retained: selects=%d joins=%d match=%v", len(doc.SelectStmts), len(doc.SelectStmts[0].Joins), doc.SelectStmts[0].Joins[0].MatchPath.Kind)
+	}
+}
+
 func TestParseGraphDDL(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

@@ -57,6 +57,14 @@ type NodeRef struct {
 // QueryDoc holds the entire AST in contiguous memory slices (Structure of Arrays).
 // The parser populates this doc with zero allocations per node by using preallocated slices.
 type QueryDoc struct {
+	// Explain marks a top-level EXPLAIN wrapper around the underlying query.
+	// ExplainQueryStart/End retain the inner SQL span so execution can reuse
+	// the normal parser/binder/executor without changing query semantics.
+	Explain           bool
+	ExplainAnalyze    bool
+	ExplainQueryStart uint32
+	ExplainQueryEnd   uint32
+
 	// Transaction statements are represented independently of row-producing
 	// statements so database adapters can bind them to a session transaction.
 	TransactionStmts []TransactionStmt
@@ -867,6 +875,10 @@ type AlterTableStmt struct {
 // Reset clears the slices to zero length while retaining capacity.
 // This allows the QueryDoc to be reused across queries with zero allocations.
 func (d *QueryDoc) Reset() {
+	d.Explain = false
+	d.ExplainAnalyze = false
+	d.ExplainQueryStart = 0
+	d.ExplainQueryEnd = 0
 	d.SelectStmts = d.SelectStmts[:0]
 	d.Projections = d.Projections[:0]
 	d.TableExprs = d.TableExprs[:0]
