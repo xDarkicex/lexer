@@ -178,8 +178,6 @@ const (
 	KindCast       // ::
 	KindShiftLeft  // <<
 	KindShiftRight // >>
-	KindExplain    // EXPLAIN
-	KindAnalyze    // ANALYZE
 	KindReset      // RESET
 	KindLike       // LIKE
 	KindILike      // ILIKE
@@ -204,6 +202,10 @@ const (
 	KindJSONAll         // ?& (all keys from a text array exist)
 	KindJSONPathExists  // @? (JSONPath existence predicate)
 	KindJSONDelete      // #- (JSON path delete)
+	// Explain tokens are appended so all pre-existing token values remain
+	// stable for optimizer/parser contracts.
+	KindExplain // EXPLAIN
+	KindAnalyze // ANALYZE
 )
 
 // Token is a single lexer emission (iterator pattern).
