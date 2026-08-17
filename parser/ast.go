@@ -440,6 +440,12 @@ type TableExpr struct {
 	Temporal       bool
 	TimestampStart uint32
 	TimestampEnd   uint32
+	// AS OF LSN — when non-empty, the query executes at this exact durable
+	// commit LSN. LSNStart/End point into the source byte slice and may contain
+	// a decimal literal or a bound parameter.
+	TemporalLSN bool
+	LSNStart    uint32
+	LSNEnd      uint32
 	// VERSIONS OF table BETWEEN TIMESTAMP start AND TIMESTAMP end selects
 	// retained record versions whose validity interval overlaps the range.
 	// The four offsets preserve the original timestamp literals/parameters.

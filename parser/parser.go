@@ -993,6 +993,17 @@ func (p *Parser) parseTableExpr() (NodeRef, error) {
 			}
 			p.advance() // consume AS
 			p.advance() // consume OF
+			if p.curr.Kind == lexer.KindIdentifier && bytes.EqualFold(p.src[p.curr.Start:p.curr.End], []byte("lsn")) {
+				p.advance() // consume LSN
+				if !isStringToken(p.curr.Kind) && p.curr.Kind != lexer.KindNumber && p.curr.Kind != lexer.KindIdentifier && p.curr.Kind != lexer.KindParam {
+					return fmt.Errorf("expected LSN literal or parameter after AS OF LSN")
+				}
+				t.TemporalLSN = true
+				t.LSNStart = p.curr.Start
+				t.LSNEnd = p.curr.End
+				p.advance()
+				return nil
+			}
 			if err := p.expect(lexer.KindTimestamp); err != nil {
 				return fmt.Errorf("expected TIMESTAMP after AS OF, got %v", p.curr.Kind)
 			}
@@ -1029,7 +1040,7 @@ func (p *Parser) parseTableExpr() (NodeRef, error) {
 			t.AliasEnd = p.curr.End
 			p.advance()
 		}
-		if !t.Temporal {
+		if !t.Temporal && !t.TemporalLSN {
 			if err := parseTemporal(); err != nil {
 				return NodeRef{}, err
 			}

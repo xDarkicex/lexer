@@ -1474,6 +1474,28 @@ func TestParseSQLAlchemyJoinTableAliases(t *testing.T) {
 	}
 }
 
+func TestParseASOFLiteralAndParameter(t *testing.T) {
+	for _, query := range []string{
+		"SELECT id FROM documents AS OF LSN 42",
+		"SELECT id FROM documents AS OF LSN $snapshot_lsn",
+	} {
+		var doc QueryDoc
+		if err := Parse([]byte(query), &doc); err != nil {
+			t.Fatalf("Parse(%q): %v", query, err)
+		}
+		if len(doc.TableExprs) != 1 {
+			t.Fatalf("Parse(%q): table count=%d, want 1", query, len(doc.TableExprs))
+		}
+		table := doc.TableExprs[0]
+		if !table.TemporalLSN {
+			t.Fatalf("Parse(%q): TemporalLSN=false", query)
+		}
+		if got := string([]byte(query)[table.LSNStart:table.LSNEnd]); got == "" {
+			t.Fatalf("Parse(%q): empty LSN span", query)
+		}
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && search(s, substr)
 }
