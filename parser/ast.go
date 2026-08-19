@@ -34,6 +34,9 @@ const (
 	NodeKindPrepareStmt
 	NodeKindExecuteStmt
 	NodeKindSessionSettingStmt
+	NodeKindMergeStmt
+	NodeKindPatternComprehension
+	NodeKindShortestPath
 )
 
 const (
@@ -67,32 +70,35 @@ type QueryDoc struct {
 
 	// Transaction statements are represented independently of row-producing
 	// statements so database adapters can bind them to a session transaction.
-	TransactionStmts []TransactionStmt
-	SelectStmts      []SelectStmt
-	Projections      []Projection
-	TableExprs       []TableExpr
-	GraphTables      []GraphTable
-	MatchPaths       []MatchPath
-	Vertexes         []Vertex
-	Edges            []Edge
-	BinaryExprs      []BinaryExpr
-	VectorFuncs      []VectorFunc
-	GraphMetrics     []GraphMetricExpr
-	BetweenExprs     []BetweenExpr
-	InExprs          []InExpr
-	UnaryExprs       []UnaryExpr
-	Identifiers      []Identifier
-	Numbers          []Number
-	Strings          []StringLiteral
-	CaseExprs        []CaseExpr
-	CaseWhens        []CaseWhen
-	FunctionExprs    []FunctionExpr
-	FunctionArgs     []NodeRef // argument arena for nested function expressions
-	WindowSpecs      []WindowSpec
-	WindowOrders     []WindowOrder
-	NamedWindows     []NamedWindow
-	CastExprs        []CastExpr
-	Nodes            []NodeRef // The root node(s) of the query
+	TransactionStmts      []TransactionStmt
+	SelectStmts           []SelectStmt
+	Projections           []Projection
+	TableExprs            []TableExpr
+	GraphTables           []GraphTable
+	MatchPaths            []MatchPath
+	Vertexes              []Vertex
+	VertexLabels          []VertexLabel
+	Edges                 []Edge
+	BinaryExprs           []BinaryExpr
+	VectorFuncs           []VectorFunc
+	GraphMetrics          []GraphMetricExpr
+	BetweenExprs          []BetweenExpr
+	InExprs               []InExpr
+	UnaryExprs            []UnaryExpr
+	Identifiers           []Identifier
+	Numbers               []Number
+	Strings               []StringLiteral
+	CaseExprs             []CaseExpr
+	CaseWhens             []CaseWhen
+	FunctionExprs         []FunctionExpr
+	PatternComprehensions []PatternComprehension
+	ShortestPaths         []ShortestPathExpr
+	FunctionArgs          []NodeRef // argument arena for nested function expressions
+	WindowSpecs           []WindowSpec
+	WindowOrders          []WindowOrder
+	NamedWindows          []NamedWindow
+	CastExprs             []CastExpr
+	Nodes                 []NodeRef // The root node(s) of the query
 
 	// CRUD statements
 	InsertStmts          []InsertStmt
@@ -118,6 +124,8 @@ type QueryDoc struct {
 	ExecuteStmts        []ExecuteStmt
 	ExecuteArgs         []NodeRef
 	SessionSettingStmts []SessionSettingStmt
+	MergeStmts          []MergeStmt
+	MergeAssignments    []MergeAssignment
 
 	// Reusable per-SELECT backing arenas. Each SELECT gets an independent
 	// arena so nested SELECT parsing cannot invalidate or merge a parent
@@ -199,6 +207,10 @@ type JoinClause struct {
 	Function   NodeRef
 	IsFunction bool
 	Type       JoinType // INNER (default), LEFT, RIGHT, FULL, CROSS
+	// Optional marks a Cypher-style OPTIONAL MATCH lowered to a left graph
+	// join. It is distinct from SQL LEFT JOIN syntax so the parser can accept
+	// both surfaces without changing existing JoinType values.
+	Optional bool
 }
 
 // SelectStmt represents a SELECT query.
@@ -476,19 +488,66 @@ type GraphTable struct {
 // MatchPath represents the entire chain of (a)-[e]->(b)
 type MatchPath struct {
 	ID            int32
+	PathAlias     uint32 // Optional path variable before `=` in a pattern.
+	PathAliasEnd  uint32
 	ElementsStart int32 // Index into a flat list of MatchElements, but for simplicity we can interleave Vertex/Edge manually or use references
 	// For SoA, we can store a slice of NodeRefs in the doc just for paths
 	PathNodesStart int32 // Index into a general NodeRef slice for the path sequence
 	PathNodesCount int32
+	Shortest       bool // wrapped by shortestPath((...))
 }
 
 // Vertex represents a node in a MATCH path (e.g. `(a)` or `(a:Label)`).
 type Vertex struct {
+	ID          int32
+	Alias       uint32 // Offset to alias (e.g., 'a' in (a))
+	AliasEnd    uint32
+	LabelStart  uint32 // Offset to label identifier (e.g., 'Label' in (a:Label)), 0 if no label
+	LabelEnd    uint32
+	LabelsStart int32
+	LabelsCount int32
+	// Predicate contains an inline vertex property map such as
+	// (a:Person {uuid: $uuid}), lowered into the existing expression arena.
+	Predicate NodeRef
+}
+
+// VertexLabel is one label span in a multi-label vertex pattern.
+type VertexLabel struct {
+	Start uint32
+	End   uint32
+}
+
+// PatternComprehension represents [path WHERE predicate | projection].
+// The path and expressions reuse the normal parser arenas.
+type PatternComprehension struct {
 	ID         int32
-	Alias      uint32 // Offset to alias (e.g., 'a' in (a))
-	AliasEnd   uint32
-	LabelStart uint32 // Offset to label identifier (e.g., 'Label' in (a:Label)), 0 if no label
-	LabelEnd   uint32
+	MatchPath  NodeRef
+	Predicate  NodeRef
+	Projection NodeRef
+}
+
+type ShortestPathExpr struct {
+	ID        int32
+	MatchPath NodeRef
+}
+
+// MergeStmt represents the Graphiti-compatible MERGE pattern surface. The
+// pattern is a MatchPath; ON CREATE/ON MATCH assignments reuse the ordinary
+// expression arena and are applied atomically by the database executor.
+type MergeStmt struct {
+	ID            int32
+	MatchPath     NodeRef
+	OnCreateStart int32
+	OnCreateCount int32
+	OnMatchStart  int32
+	OnMatchCount  int32
+	Returning     []NodeRef
+	ReturningStar bool
+}
+
+type MergeAssignment struct {
+	Column NodeRef
+	Value  NodeRef
 }
 
 // Edge represents -[e]- or -> graph connections, with optional type annotation.
@@ -885,6 +944,7 @@ func (d *QueryDoc) Reset() {
 	d.GraphTables = d.GraphTables[:0]
 	d.MatchPaths = d.MatchPaths[:0]
 	d.Vertexes = d.Vertexes[:0]
+	d.VertexLabels = d.VertexLabels[:0]
 	d.Edges = d.Edges[:0]
 	d.BinaryExprs = d.BinaryExprs[:0]
 	d.VectorFuncs = d.VectorFuncs[:0]
@@ -897,6 +957,8 @@ func (d *QueryDoc) Reset() {
 	d.CaseExprs = d.CaseExprs[:0]
 	d.CaseWhens = d.CaseWhens[:0]
 	d.FunctionExprs = d.FunctionExprs[:0]
+	d.PatternComprehensions = d.PatternComprehensions[:0]
+	d.ShortestPaths = d.ShortestPaths[:0]
 	d.FunctionArgs = d.FunctionArgs[:0]
 	d.WindowSpecs = d.WindowSpecs[:0]
 	d.WindowOrders = d.WindowOrders[:0]
@@ -923,6 +985,8 @@ func (d *QueryDoc) Reset() {
 	d.ExecuteStmts = d.ExecuteStmts[:0]
 	d.ExecuteArgs = d.ExecuteArgs[:0]
 	d.SessionSettingStmts = d.SessionSettingStmts[:0]
+	d.MergeStmts = d.MergeStmts[:0]
+	d.MergeAssignments = d.MergeAssignments[:0]
 	for i := range d.SelectStmts {
 		d.SelectStmts[i].Joins = nil
 		d.SelectStmts[i].GroupBy = nil

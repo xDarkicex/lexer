@@ -75,6 +75,12 @@ func Parse(src []byte, doc *QueryDoc) error {
 				return err
 			}
 			doc.Nodes = append(doc.Nodes, stmtRef)
+		case lexer.KindMatch:
+			stmtRef, err := p.parseCypherMatchStmt()
+			if err != nil {
+				return err
+			}
+			doc.Nodes = append(doc.Nodes, stmtRef)
 		case lexer.KindInsert:
 			return p.dispatchInsertStmt()
 		case lexer.KindUpdate:
@@ -173,6 +179,12 @@ func Parse(src []byte, doc *QueryDoc) error {
 				return err
 			}
 			doc.Nodes = append(doc.Nodes, stmtRef)
+		case lexer.KindMerge:
+			stmtRef, err := p.parseMergeStmt()
+			if err != nil {
+				return err
+			}
+			doc.Nodes = append(doc.Nodes, stmtRef)
 		case lexer.KindSet:
 			stmtRef, err := p.parseSessionSettingStmt(false)
 			if err != nil {
@@ -212,6 +224,153 @@ func (p *Parser) parseSelectOrWith() (NodeRef, error) {
 		return p.parseWithSelect()
 	}
 	return p.parseSelectStmt()
+}
+
+// parseCypherMatchStmt lowers the native Cypher surface into the existing
+// SelectStmt/GraphTable representation. The graph executor therefore remains
+// shared with SQL JOIN MATCH and GRAPH_TABLE rather than creating a second
+// traversal implementation.
+func (p *Parser) parseCypherMatchStmt() (NodeRef, error) {
+	sourceStart := p.curr.Start
+	p.advance() // MATCH
+
+	var matchRef NodeRef
+	var pathAliasStart, pathAliasEnd uint32
+	if p.curr.Kind == lexer.KindIdentifier && p.next.Kind == lexer.KindEquals {
+		pathAliasStart, pathAliasEnd = p.curr.Start, p.curr.End
+		p.advance() // =
+		p.advance() // pattern or shortestPath
+	}
+	if p.curr.Kind == lexer.KindShortestPath {
+		p.advance()
+		if err := p.expect(lexer.KindLeftParen); err != nil {
+			return NodeRef{}, fmt.Errorf("shortestPath: %w", err)
+		}
+		var err error
+		matchRef, err = p.parseMatchPath()
+		if err != nil {
+			return NodeRef{}, err
+		}
+		if err := p.expect(lexer.KindRightParen); err != nil {
+			return NodeRef{}, fmt.Errorf("shortestPath: %w", err)
+		}
+		p.doc.MatchPaths[matchRef.ID].Shortest = true
+	} else {
+		var err error
+		matchRef, err = p.parseMatchPath()
+		if err != nil {
+			return NodeRef{}, err
+		}
+		if matchRef.Kind != NodeKindMatchPath {
+			return NodeRef{}, fmt.Errorf("invalid MATCH pattern")
+		}
+	}
+	if pathAliasEnd > pathAliasStart {
+		p.doc.MatchPaths[matchRef.ID].PathAlias = pathAliasStart
+		p.doc.MatchPaths[matchRef.ID].PathAliasEnd = pathAliasEnd
+	}
+
+	stmt := SelectStmt{
+		ID:          int32(len(p.doc.SelectStmts)),
+		SourceStart: sourceStart,
+		Limit:       -1,
+		Offset:      -1,
+	}
+	stmt.Joins = p.doc.reusableJoinArena(p.arenaCursor)
+	stmt.GroupBy = p.doc.reusableGroupByArena(p.arenaCursor)
+	stmt.OrderTerms = p.doc.reusableOrderTermsArena(p.arenaCursor)
+	p.arenaCursor++
+	gt := GraphTable{ID: int32(len(p.doc.GraphTables)), MatchPath: matchRef}
+	p.doc.GraphTables = append(p.doc.GraphTables, gt)
+	stmt.FromTable = NodeRef{Kind: NodeKindGraphTable, ID: gt.ID}
+
+	// Cypher places WHERE between the pattern and RETURN.
+	if p.curr.Kind == lexer.KindWhere {
+		p.advance()
+		where, err := p.parseExpr(0)
+		if err != nil {
+			return NodeRef{}, err
+		}
+		stmt.WhereExpr = where
+	}
+	if p.curr.Kind != lexer.KindReturn {
+		return NodeRef{}, fmt.Errorf("MATCH requires RETURN")
+	}
+	p.advance()
+	local := make([]Projection, 0, 4)
+	for p.curr.Kind != lexer.KindEOF && p.curr.Kind != lexer.KindOrder &&
+		p.curr.Kind != lexer.KindLimit && p.curr.Kind != lexer.KindOffset {
+		proj, err := p.parseProjection()
+		if err != nil {
+			return NodeRef{}, err
+		}
+		local = append(local, proj)
+		stmt.ProjectionsCount++
+		if p.curr.Kind != lexer.KindComma {
+			break
+		}
+		p.advance()
+	}
+	if len(local) == 0 {
+		return NodeRef{}, fmt.Errorf("RETURN requires at least one projection")
+	}
+
+	if p.curr.Kind == lexer.KindOrder {
+		p.advance()
+		if err := p.expect(lexer.KindBy); err != nil {
+			return NodeRef{}, err
+		}
+		for {
+			expr, err := p.parseExpr(0)
+			if err != nil {
+				return NodeRef{}, err
+			}
+			term := OrderTerm{Expr: expr}
+			if p.curr.Kind == lexer.KindDesc {
+				term.IsDesc = true
+				p.advance()
+			} else if p.curr.Kind == lexer.KindAsc {
+				p.advance()
+			}
+			stmt.OrderTerms = append(stmt.OrderTerms, term)
+			if len(stmt.OrderTerms) == 1 {
+				stmt.OrderBy, stmt.IsDesc = term.Expr, term.IsDesc
+			}
+			if p.curr.Kind != lexer.KindComma {
+				break
+			}
+			p.advance()
+		}
+	}
+	for p.curr.Kind == lexer.KindLimit || p.curr.Kind == lexer.KindOffset {
+		isOffset := p.curr.Kind == lexer.KindOffset
+		p.advance()
+		if p.curr.Kind != lexer.KindNumber {
+			return NodeRef{}, fmt.Errorf("expected number after graph %s", map[bool]string{true: "OFFSET", false: "LIMIT"}[isOffset])
+		}
+		n := Number{ID: int32(len(p.doc.Numbers)), Start: p.curr.Start, End: p.curr.End}
+		p.doc.Numbers = append(p.doc.Numbers, n)
+		if isOffset {
+			stmt.Offset = n.ID
+		} else {
+			stmt.Limit = n.ID
+		}
+		p.advance()
+	}
+	stmt.ProjectionsStart = int32(len(p.doc.Projections))
+	for i := range local {
+		local[i].ID = int32(len(p.doc.Projections))
+		p.doc.Projections = append(p.doc.Projections, local[i])
+	}
+	stmt.SourceEnd = p.curr.Start
+	if stmt.SourceEnd == 0 || stmt.SourceEnd > uint32(len(p.src)) {
+		stmt.SourceEnd = uint32(len(p.src))
+	}
+	p.doc.SelectStmts = append(p.doc.SelectStmts, stmt)
+	p.doc.joinArenas[p.arenaCursor-1] = stmt.Joins
+	p.doc.groupByArenas[p.arenaCursor-1] = stmt.GroupBy
+	p.doc.orderTermsArenas[p.arenaCursor-1] = stmt.OrderTerms
+	return NodeRef{Kind: NodeKindSelectStmt, ID: stmt.ID}, nil
 }
 
 // parseSessionSettingStmt parses the session-local controls supported by the
@@ -374,6 +533,83 @@ func (p *Parser) parseExecuteStmt() (NodeRef, error) {
 	}
 	p.doc.ExecuteStmts = append(p.doc.ExecuteStmts, stmt)
 	return NodeRef{Kind: NodeKindExecuteStmt, ID: stmt.ID}, nil
+}
+
+// parseMergeStmt parses the Graphiti-compatible graph upsert surface:
+// MERGE (a:Person {uuid: $uuid})-[:KNOWS]->(b)
+//
+//	ON CREATE SET a.created_at = $ts
+//	ON MATCH SET a.updated_at = $ts
+//
+// The graph executor owns conflict resolution and atomic publication.
+func (p *Parser) parseMergeStmt() (NodeRef, error) {
+	p.advance() // MERGE
+	pathAliasStart, pathAliasEnd := uint32(0), uint32(0)
+	if p.curr.Kind == lexer.KindIdentifier && p.next.Kind == lexer.KindEquals {
+		pathAliasStart, pathAliasEnd = p.curr.Start, p.curr.End
+		p.advance()
+		p.advance()
+	}
+	if p.curr.Kind != lexer.KindLeftParen {
+		return NodeRef{}, fmt.Errorf("MERGE requires a graph pattern")
+	}
+	matchRef, err := p.parseMatchPath()
+	if err != nil {
+		return NodeRef{}, fmt.Errorf("MERGE pattern: %w", err)
+	}
+	if pathAliasEnd > pathAliasStart && matchRef.ID >= 0 && int(matchRef.ID) < len(p.doc.MatchPaths) {
+		p.doc.MatchPaths[matchRef.ID].PathAlias = pathAliasStart
+		p.doc.MatchPaths[matchRef.ID].PathAliasEnd = pathAliasEnd
+	}
+	stmt := MergeStmt{ID: int32(len(p.doc.MergeStmts)), MatchPath: matchRef}
+	for p.curr.Kind == lexer.KindOn {
+		p.advance()
+		section := p.curr.Kind
+		if section != lexer.KindMatch && section != lexer.KindCreate {
+			return NodeRef{}, fmt.Errorf("expected MATCH or CREATE after ON")
+		}
+		p.advance()
+		if p.curr.Kind != lexer.KindSet {
+			return NodeRef{}, fmt.Errorf("expected SET after ON")
+		}
+		p.advance()
+		start := int32(len(p.doc.MergeAssignments))
+		for {
+			// Parse only the assignment target. Using precedence zero would
+			// consume the following '=' as part of the expression, leaving no
+			// delimiter for MERGE's SET grammar.
+			column, err := p.parseExpr(operatorPrecedence(lexer.KindEquals))
+			if err != nil {
+				return NodeRef{}, fmt.Errorf("MERGE assignment target: %w", err)
+			}
+			if column.Kind != NodeKindIdentifier || p.curr.Kind != lexer.KindEquals {
+				return NodeRef{}, fmt.Errorf("MERGE SET requires alias.column = expression")
+			}
+			p.advance()
+			value, err := p.parseExpr(0)
+			if err != nil {
+				return NodeRef{}, fmt.Errorf("MERGE assignment value: %w", err)
+			}
+			p.doc.MergeAssignments = append(p.doc.MergeAssignments, MergeAssignment{Column: column, Value: value})
+			if p.curr.Kind != lexer.KindComma {
+				break
+			}
+			p.advance()
+		}
+		count := int32(len(p.doc.MergeAssignments)) - start
+		if section == lexer.KindCreate {
+			stmt.OnCreateStart, stmt.OnCreateCount = start, count
+		} else {
+			stmt.OnMatchStart, stmt.OnMatchCount = start, count
+		}
+	}
+	if p.curr.Kind == lexer.KindReturning {
+		if err := p.parseReturning(&stmt.Returning, &stmt.ReturningStar); err != nil {
+			return NodeRef{}, err
+		}
+	}
+	p.doc.MergeStmts = append(p.doc.MergeStmts, stmt)
+	return NodeRef{Kind: NodeKindMergeStmt, ID: stmt.ID}, nil
 }
 
 func (p *Parser) advance() {
@@ -559,6 +795,7 @@ func (p *Parser) parseSelectStmt() (NodeRef, error) {
 
 	// Parse JOIN clauses
 	for p.curr.Kind == lexer.KindJoin ||
+		p.curr.Kind == lexer.KindOptional ||
 		p.curr.Kind == lexer.KindLeft ||
 		p.curr.Kind == lexer.KindRight ||
 		p.curr.Kind == lexer.KindInner ||
@@ -1327,6 +1564,15 @@ func (p *Parser) parseMatchPath() (NodeRef, error) {
 		ID:             int32(len(p.doc.MatchPaths)),
 		PathNodesStart: int32(len(p.doc.Nodes)),
 	}
+	// Cypher permits a path variable before the pattern, for example
+	// `p = (a)-[:KNOWS]->(b)`. Preserve the alias on the path so SQL/PGQ
+	// adapters can expose a stable path-valued projection without reparsing.
+	if p.curr.Kind == lexer.KindIdentifier && p.next.Kind == lexer.KindEquals {
+		mp.PathAlias = p.curr.Start
+		mp.PathAliasEnd = p.curr.End
+		p.advance()
+		p.advance()
+	}
 
 	for {
 		if p.curr.Kind == lexer.KindLeftParen {
@@ -1341,14 +1587,28 @@ func (p *Parser) parseMatchPath() (NodeRef, error) {
 				p.advance()
 			}
 			if p.curr.Kind == lexer.KindColon {
-				p.advance()
-				if p.curr.Kind == lexer.KindIdentifier {
-					v.LabelStart = p.curr.Start
-					v.LabelEnd = p.curr.End
+				v.LabelsStart = int32(len(p.doc.VertexLabels))
+				for p.curr.Kind == lexer.KindColon {
 					p.advance()
-				} else {
-					return NodeRef{}, fmt.Errorf("expected vertex label after colon")
+					if p.curr.Kind != lexer.KindIdentifier {
+						return NodeRef{}, fmt.Errorf("expected vertex label after colon")
+					}
+					label := VertexLabel{Start: p.curr.Start, End: p.curr.End}
+					p.doc.VertexLabels = append(p.doc.VertexLabels, label)
+					v.LabelsCount++
+					if v.LabelsCount == 1 {
+						v.LabelStart, v.LabelEnd = label.Start, label.End
+					}
+					p.advance()
 				}
+			}
+			if p.curr.Kind == lexer.KindLeftBrace {
+				predicate, err := p.parseEdgePropertyBlock()
+				if err != nil {
+					return NodeRef{}, fmt.Errorf("vertex properties: %w", err)
+				}
+				p.qualifyInlinePropertyPredicate(predicate, v.Alias, v.AliasEnd)
+				v.Predicate = predicate
 			}
 			if err := p.expect(lexer.KindRightParen); err != nil {
 				return NodeRef{}, err
@@ -1372,6 +1632,16 @@ func (p *Parser) parseMatchPath() (NodeRef, error) {
 				p.advance() // consume dash
 			}
 
+			// Cypher also permits an anonymous property map directly on a
+			// directed relationship: -{weight > 0.5}->(b). Lower it to the
+			// same edge predicate AST used by bracketed relationships.
+			if p.curr.Kind == lexer.KindLeftBrace {
+				predicate, err := p.parseEdgePropertyBlock()
+				if err != nil {
+					return NodeRef{}, fmt.Errorf("anonymous edge properties: %w", err)
+				}
+				e.Predicate = predicate
+			}
 			if p.curr.Kind == lexer.KindLeftBracket {
 				p.advance()
 				if p.curr.Kind == lexer.KindIdentifier {
@@ -1520,6 +1790,29 @@ func (p *Parser) parseEdgePropertyBlock() (NodeRef, error) {
 		return NodeRef{}, err
 	}
 	return combined, nil
+}
+
+// qualifyInlinePropertyPredicate attaches the vertex alias to the left side
+// of each property comparison. Edge property blocks are intentionally kept
+// unqualified because their evaluator resolves edge fields separately.
+func (p *Parser) qualifyInlinePropertyPredicate(ref NodeRef, aliasStart, aliasEnd uint32) {
+	if ref.Kind != NodeKindBinaryExpr || ref.ID < 0 || int(ref.ID) >= len(p.doc.BinaryExprs) {
+		return
+	}
+	be := &p.doc.BinaryExprs[ref.ID]
+	if be.Operator == uint8(lexer.KindAnd) || be.Operator == uint8(lexer.KindOr) {
+		p.qualifyInlinePropertyPredicate(be.Left, aliasStart, aliasEnd)
+		p.qualifyInlinePropertyPredicate(be.Right, aliasStart, aliasEnd)
+		return
+	}
+	if be.Left.Kind != NodeKindIdentifier || be.Left.ID < 0 || int(be.Left.ID) >= len(p.doc.Identifiers) {
+		return
+	}
+	id := &p.doc.Identifiers[be.Left.ID]
+	if id.QualStart == id.QualEnd && aliasEnd > aliasStart {
+		id.QualStart = aliasStart
+		id.QualEnd = aliasEnd
+	}
 }
 
 func (p *Parser) parseEdgePropertyExpr(precedence int) (NodeRef, error) {
@@ -1824,6 +2117,37 @@ func (p *Parser) parseExpr(precedence int) (NodeRef, error) {
 		left = NodeRef{Kind: NodeKindNumber, ID: num.ID}
 		p.advance()
 	case lexer.KindLeftBracket:
+		// Graph pattern comprehension: [(a)-[:KNOWS]->(b) | b.id].
+		// Numeric/vector arrays retain the legacy source-backed identifier path.
+		if p.next.Kind == lexer.KindLeftParen {
+			p.advance() // consume [
+			matchRef, err := p.parseMatchPath()
+			if err != nil {
+				return NodeRef{}, fmt.Errorf("pattern comprehension: %w", err)
+			}
+			predicate := NodeRef{}
+			if p.curr.Kind == lexer.KindWhere {
+				p.advance()
+				predicate, err = p.parseExpr(0)
+				if err != nil {
+					return NodeRef{}, fmt.Errorf("pattern comprehension WHERE: %w", err)
+				}
+			}
+			if err := p.expect(lexer.KindPipe); err != nil {
+				return NodeRef{}, fmt.Errorf("pattern comprehension: %w", err)
+			}
+			projection, err := p.parseExpr(0)
+			if err != nil {
+				return NodeRef{}, fmt.Errorf("pattern comprehension projection: %w", err)
+			}
+			if err := p.expect(lexer.KindRightBracket); err != nil {
+				return NodeRef{}, fmt.Errorf("pattern comprehension: %w", err)
+			}
+			pc := PatternComprehension{ID: int32(len(p.doc.PatternComprehensions)), MatchPath: matchRef, Predicate: predicate, Projection: projection}
+			p.doc.PatternComprehensions = append(p.doc.PatternComprehensions, pc)
+			left = NodeRef{Kind: NodeKindPatternComprehension, ID: pc.ID}
+			break
+		}
 		// simple array stub just for testing [1.0, 0.5]
 		// we treat the whole array as an identifier node for now in the AST to save defining Array literal AST nodes
 		start := p.curr.Start
@@ -1841,6 +2165,23 @@ func (p *Parser) parseExpr(precedence int) (NodeRef, error) {
 		}
 		left = NodeRef{Kind: NodeKindIdentifier, ID: id.ID}
 		p.doc.Identifiers = append(p.doc.Identifiers, id)
+	case lexer.KindShortestPath:
+		p.advance()
+		if err := p.expect(lexer.KindLeftParen); err != nil {
+			return NodeRef{}, fmt.Errorf("shortestPath: %w", err)
+		}
+		matchRef, err := p.parseMatchPath()
+		if err != nil {
+			return NodeRef{}, err
+		}
+		if err := p.expect(lexer.KindRightParen); err != nil {
+			return NodeRef{}, fmt.Errorf("shortestPath: %w", err)
+		}
+		p.doc.MatchPaths[matchRef.ID].Shortest = true
+		sp := ShortestPathExpr{ID: int32(len(p.doc.ShortestPaths)), MatchPath: matchRef}
+		p.doc.ShortestPaths = append(p.doc.ShortestPaths, sp)
+		left = NodeRef{Kind: NodeKindShortestPath, ID: sp.ID}
+
 	case lexer.KindExists:
 		// EXISTS (SELECT ...) is a subquery expression with an explicit
 		// marker; keeping it in the expression arena avoids SQL rewriting.
@@ -4041,6 +4382,20 @@ func (p *Parser) parseAlterTableStmt() error {
 
 func (p *Parser) parseJoinClause() (JoinClause, error) {
 	jc := JoinClause{Type: JoinInner} // default to INNER
+	optional := false
+	if p.curr.Kind == lexer.KindOptional {
+		optional = true
+		p.advance()
+		// Accept both Cypher's OPTIONAL MATCH and the explicit
+		// OPTIONAL JOIN MATCH spelling.
+		if p.curr.Kind == lexer.KindJoin {
+			p.advance()
+		}
+		if p.curr.Kind != lexer.KindMatch {
+			return JoinClause{}, fmt.Errorf("OPTIONAL requires MATCH")
+		}
+		jc.Type = JoinLeft
+	}
 
 	// Parse optional join type qualifier: LEFT, RIGHT, FULL, INNER, CROSS, OUTER
 	switch p.curr.Kind {
@@ -4088,6 +4443,7 @@ func (p *Parser) parseJoinClause() (JoinClause, error) {
 			return JoinClause{}, err
 		}
 		jc.MatchPath = matchRef
+		jc.Optional = optional
 		// Optional ON clause after the match path: JOIN MATCH (...) ON s.id = x.id
 		if p.curr.Kind == lexer.KindOn {
 			p.advance()

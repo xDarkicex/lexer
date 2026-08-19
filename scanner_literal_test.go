@@ -64,7 +64,6 @@ func TestScannerErrorIsSticky(t *testing.T) {
 		name string
 		src  string
 	}{
-		{name: "single pipe", src: "| SELECT"},
 		{name: "bare at", src: "@ SELECT"},
 		{name: "unrecognized char", src: "; SELECT"},
 		{name: "double quote", src: `"foo`},
@@ -79,6 +78,14 @@ func TestScannerErrorIsSticky(t *testing.T) {
 				t.Fatal("scanner continued after KindError")
 			}
 		})
+	}
+}
+
+func TestScannerPatternPipe(t *testing.T) {
+	s := New([]byte("| SELECT"))
+	tok, ok := s.Next()
+	if !ok || tok.Kind != KindPipe || tok.Start != 0 || tok.End != 1 {
+		t.Fatalf("token=%#v ok=%v", tok, ok)
 	}
 }
 

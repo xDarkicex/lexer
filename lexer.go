@@ -204,8 +204,15 @@ const (
 	KindJSONDelete      // #- (JSON path delete)
 	// Explain tokens are appended so all pre-existing token values remain
 	// stable for optimizer/parser contracts.
-	KindExplain // EXPLAIN
-	KindAnalyze // ANALYZE
+	KindExplain  // EXPLAIN
+	KindAnalyze  // ANALYZE
+	KindOptional // OPTIONAL
+	KindMerge    // MERGE
+	// Graph/Cypher extensions are appended to preserve the numeric values of
+	// every existing token used by the parser and physical-plan contracts.
+	KindReturn       // RETURN
+	KindShortestPath // shortestPath(...)
+	KindPipe         // | (pattern-comprehension projection separator)
 )
 
 // Token is a single lexer emission (iterator pattern).
@@ -354,8 +361,7 @@ func (s *Scanner) Next() (Token, bool) {
 			s.pos++
 			return Token{Start: start, End: s.pos, Kind: KindConcat}, true
 		}
-		s.failed = true
-		return Token{Start: start, End: s.pos, Kind: KindError}, true
+		return Token{Start: start, End: s.pos, Kind: KindPipe}, true
 	case '=':
 		s.pos++
 		return Token{Start: start, End: s.pos, Kind: KindEquals}, true
@@ -743,6 +749,8 @@ func (s *Scanner) Next() (Token, bool) {
 				kind = KindRollback
 			} else if caseInsensitiveMatch(s.src[start:start+5], "reset") {
 				kind = KindReset
+			} else if caseInsensitiveMatch(s.src[start:start+5], "merge") {
+				kind = KindMerge
 			}
 		case 6:
 			if caseInsensitiveMatch(s.src[start:start+6], "select") {
@@ -777,6 +785,8 @@ func (s *Scanner) Next() (Token, bool) {
 				kind = KindNullif
 			} else if caseInsensitiveMatch(s.src[start:start+6], "except") {
 				kind = KindExcept
+			} else if caseInsensitiveMatch(s.src[start:start+6], "return") {
+				kind = KindReturn
 			}
 		case 7:
 			if caseInsensitiveMatch(s.src[start:start+7], "between") {
@@ -819,6 +829,8 @@ func (s *Scanner) Next() (Token, bool) {
 				kind = KindConflict
 			} else if caseInsensitiveMatch(s.src[start:start+8], "excluded") {
 				kind = KindExcluded
+			} else if caseInsensitiveMatch(s.src[start:start+8], "optional") {
+				kind = KindOptional
 			}
 		case 9:
 			if caseInsensitiveMatch(s.src[start:start+9], "timestamp") {
@@ -841,6 +853,10 @@ func (s *Scanner) Next() (Token, bool) {
 		case 11:
 			if caseInsensitiveMatch(s.src[start:start+11], "graph_table") {
 				kind = KindGraphTable
+			}
+		case 12:
+			if caseInsensitiveMatch(s.src[start:start+12], "shortestpath") {
+				kind = KindShortestPath
 			}
 		case 15:
 			if caseInsensitiveMatch(s.src[start:start+15], "vector_distance") {
