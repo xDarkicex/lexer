@@ -1119,12 +1119,12 @@ func isIdentifierLike(k lexer.Kind) bool {
 	return k == lexer.KindIdentifier || k >= lexer.KindSelect
 }
 
-// isColumnToken accepts SQL's KEY keyword as an unquoted column identifier.
-// KEY is reserved for FOREIGN KEY grammar, but PostgreSQL-compatible DML
-// commonly uses a column literally named "key"; it is unambiguous in column
-// and expression positions.
+// isColumnToken accepts SQL keywords that remain legal as unquoted relation or
+// column identifiers in the positions handled by the parser. KEY is reserved
+// for FOREIGN KEY grammar, and OPTIONAL is reserved for OPTIONAL MATCH, but
+// both remain valid PostgreSQL-compatible identifiers in DDL and expressions.
 func isColumnToken(k lexer.Kind) bool {
-	return k == lexer.KindIdentifier || k == lexer.KindKey
+	return k == lexer.KindIdentifier || k == lexer.KindKey || k == lexer.KindOptional
 }
 
 func isStringToken(k lexer.Kind) bool {
