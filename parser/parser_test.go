@@ -87,6 +87,77 @@ func TestParseSQL(t *testing.T) {
 	}
 }
 
+func TestParseArrayCosineSimilarity(t *testing.T) {
+	var doc QueryDoc
+	if err := Parse([]byte("SELECT array_cosine_similarity(vector, '[1,0,0,0]') AS score FROM docs"), &doc); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(doc.VectorFuncs) != 1 {
+		t.Fatalf("vector funcs: got %d, want 1", len(doc.VectorFuncs))
+	}
+	if !doc.VectorFuncs[0].IsMaxSim {
+		t.Fatal("array_cosine_similarity must lower to max-sim vector function")
+	}
+}
+
+func TestGraphitiCypherClauseAdditions(t *testing.T) {
+	tests := []struct {
+		name  string
+		sql   string
+		check func(*testing.T, *QueryDoc)
+	}{
+		{
+			name: "detach delete",
+			sql:  "MATCH (a)-[r:REL]->(b) DETACH DELETE a",
+			check: func(t *testing.T, doc *QueryDoc) {
+				if len(doc.DeleteStmts) != 1 || !doc.DeleteStmts[0].Cypher || !doc.DeleteStmts[0].Detach || len(doc.DeleteStmts[0].Targets) != 1 {
+					t.Fatalf("delete AST: %#v", doc.DeleteStmts)
+				}
+			},
+		},
+		{
+			name: "universal merge set",
+			sql:  "MERGE (n:Entity {uuid: $u}) SET n.name = $name ON MATCH SET n.updated = $ts",
+			check: func(t *testing.T, doc *QueryDoc) {
+				if len(doc.MergeStmts) != 1 || doc.MergeStmts[0].UniversalSetCount != 1 || doc.MergeStmts[0].OnMatchCount != 1 {
+					t.Fatalf("merge AST: %#v assignments=%#v", doc.MergeStmts, doc.MergeAssignments)
+				}
+			},
+		},
+		{
+			name: "pipe with",
+			sql:  "MATCH (n) WITH DISTINCT n.uuid AS u WHERE u <> 'x' ORDER BY u SKIP 1 LIMIT 2 RETURN u",
+			check: func(t *testing.T, doc *QueryDoc) {
+				if len(doc.SelectStmts) != 1 || doc.SelectStmts[0].PipeWithCount != 1 || len(doc.WithClauses) != 1 {
+					t.Fatalf("with AST: selects=%#v clauses=%#v", doc.SelectStmts, doc.WithClauses)
+				}
+				clause := doc.WithClauses[0]
+				if !clause.Distinct || clause.Where.Kind == NodeKindUnknown || len(clause.OrderTerms) != 1 || clause.Skip.Kind == NodeKindUnknown || clause.Limit.Kind == NodeKindUnknown {
+					t.Fatalf("with clause: %#v", clause)
+				}
+			},
+		},
+		{
+			name: "pipe with followed by match",
+			sql:  "MATCH (n) WITH n.uuid AS u MATCH (m {uuid: u}) RETURN m.uuid",
+			check: func(t *testing.T, doc *QueryDoc) {
+				if len(doc.WithClauses) != 1 || doc.WithClauses[0].MatchPath.Kind != NodeKindMatchPath {
+					t.Fatalf("chained WITH AST: %#v", doc.WithClauses)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := &QueryDoc{}
+			if err := Parse([]byte(tt.sql), doc); err != nil {
+				t.Fatalf("Parse(%q): %v", tt.sql, err)
+			}
+			tt.check(t, doc)
+		})
+	}
+}
+
 func TestParseExplainAnalyzeGraphQuery(t *testing.T) {
 	src := []byte("EXPLAIN ANALYZE SELECT src.id FROM people src JOIN MATCH (src)-[:FOLLOWS]->(tgt) WHERE src.id = $1;")
 	var doc QueryDoc
@@ -188,6 +259,34 @@ func TestParseAggregateParameters(t *testing.T) {
 		if got := string(src[id.Start:id.End]); got != want[i] {
 			t.Errorf("aggregate %d argument=%q, want %q", i, got, want[i])
 		}
+	}
+}
+
+func TestParseCypherINListParameter(t *testing.T) {
+	src := []byte(`MATCH (e) WHERE e.group_id IN $group_ids RETURN e.id`)
+	var doc QueryDoc
+	if err := Parse(src, &doc); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(doc.InExprs) != 1 {
+		t.Fatalf("IN expressions=%d, want 1", len(doc.InExprs))
+	}
+	in := doc.InExprs[0]
+	if !in.IsParam || in.ParamRef.Kind != NodeKindIdentifier {
+		t.Fatalf("IN expression=%#v, want parameter reference", in)
+	}
+	param := doc.Identifiers[in.ParamRef.ID]
+	if got := string(src[param.Start:param.End]); got != "$group_ids" {
+		t.Fatalf("parameter=%q, want $group_ids", got)
+	}
+
+	src = []byte(`MATCH (e) WHERE e.group_id NOT IN $group_ids RETURN e.id`)
+	doc.Reset()
+	if err := Parse(src, &doc); err != nil {
+		t.Fatalf("Parse NOT IN: %v", err)
+	}
+	if len(doc.InExprs) != 1 || !doc.InExprs[0].IsParam || !doc.InExprs[0].Not {
+		t.Fatalf("NOT IN expression=%#v, want negated parameter reference", doc.InExprs)
 	}
 }
 

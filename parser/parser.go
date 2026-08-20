@@ -293,6 +293,39 @@ func (p *Parser) parseCypherMatchStmt() (NodeRef, error) {
 		}
 		stmt.WhereExpr = where
 	}
+	if p.curr.Kind == lexer.KindDetach || p.curr.Kind == lexer.KindDelete {
+		return p.parseCypherDelete(matchRef, stmt.WhereExpr)
+	}
+
+	// A native Cypher pipe keeps the same graph source and stores each WITH
+	// boundary on the SELECT statement. The executor consumes these clauses
+	// before evaluating the final RETURN projection.
+	pipeStart := int32(len(p.doc.WithClauses))
+	for p.curr.Kind == lexer.KindWith {
+		clause, err := p.parseCypherWithClause()
+		if err != nil {
+			return NodeRef{}, err
+		}
+		if p.curr.Kind == lexer.KindMatch {
+			p.advance()
+			matchPath, matchErr := p.parseMatchPath()
+			if matchErr != nil {
+				return NodeRef{}, fmt.Errorf("MATCH after WITH: %w", matchErr)
+			}
+			clause.MatchPath = matchPath
+			if p.curr.Kind == lexer.KindWhere {
+				p.advance()
+				where, whereErr := p.parseExpr(0)
+				if whereErr != nil {
+					return NodeRef{}, fmt.Errorf("MATCH after WITH WHERE: %w", whereErr)
+				}
+				clause.MatchWhere = where
+			}
+		}
+		p.doc.WithClauses = append(p.doc.WithClauses, clause)
+	}
+	stmt.PipeWithStart = pipeStart
+	stmt.PipeWithCount = int32(len(p.doc.WithClauses)) - pipeStart
 	if p.curr.Kind != lexer.KindReturn {
 		return NodeRef{}, fmt.Errorf("MATCH requires RETURN")
 	}
@@ -345,6 +378,18 @@ func (p *Parser) parseCypherMatchStmt() (NodeRef, error) {
 	for p.curr.Kind == lexer.KindLimit || p.curr.Kind == lexer.KindOffset {
 		isOffset := p.curr.Kind == lexer.KindOffset
 		p.advance()
+		if p.curr.Kind == lexer.KindParam {
+			ref, err := p.parseExpr(0)
+			if err != nil {
+				return NodeRef{}, err
+			}
+			if isOffset {
+				stmt.OffsetExpr = ref
+			} else {
+				stmt.LimitExpr = ref
+			}
+			continue
+		}
 		if p.curr.Kind != lexer.KindNumber {
 			return NodeRef{}, fmt.Errorf("expected number after graph %s", map[bool]string{true: "OFFSET", false: "LIMIT"}[isOffset])
 		}
@@ -371,6 +416,117 @@ func (p *Parser) parseCypherMatchStmt() (NodeRef, error) {
 	p.doc.groupByArenas[p.arenaCursor-1] = stmt.GroupBy
 	p.doc.orderTermsArenas[p.arenaCursor-1] = stmt.OrderTerms
 	return NodeRef{Kind: NodeKindSelectStmt, ID: stmt.ID}, nil
+}
+
+func (p *Parser) parseCypherDelete(matchRef NodeRef, where NodeRef) (NodeRef, error) {
+	detach := false
+	if p.curr.Kind == lexer.KindDetach {
+		detach = true
+		p.advance()
+	}
+	if p.curr.Kind != lexer.KindDelete {
+		return NodeRef{}, fmt.Errorf("expected DELETE after MATCH")
+	}
+	p.advance()
+	targets := make([]NodeRef, 0, 2)
+	for {
+		if p.curr.Kind != lexer.KindIdentifier && p.curr.Kind != lexer.KindKey && p.curr.Kind != lexer.KindOptional {
+			return NodeRef{}, fmt.Errorf("expected graph alias after DELETE, got %v", p.curr.Kind)
+		}
+		id := Identifier{ID: int32(len(p.doc.Identifiers)), Start: p.curr.Start, End: p.curr.End}
+		p.doc.Identifiers = append(p.doc.Identifiers, id)
+		targets = append(targets, NodeRef{Kind: NodeKindIdentifier, ID: id.ID})
+		p.advance()
+		if p.curr.Kind != lexer.KindComma {
+			break
+		}
+		p.advance()
+	}
+	stmt := DeleteStmt{
+		Cypher: true, Detach: detach, MatchPath: matchRef,
+		Targets: targets, WhereExpr: where,
+	}
+	id := int32(len(p.doc.DeleteStmts))
+	p.doc.DeleteStmts = append(p.doc.DeleteStmts, stmt)
+	return NodeRef{Kind: NodeKindDeleteStmt, ID: id}, nil
+}
+
+func (p *Parser) parseCypherWithClause() (WithClause, error) {
+	p.advance() // WITH
+	clause := WithClause{ID: int32(len(p.doc.WithClauses))}
+	if p.curr.Kind == lexer.KindDistinct {
+		clause.Distinct = true
+		p.advance()
+	}
+	for {
+		if p.curr.Kind == lexer.KindWhere || p.curr.Kind == lexer.KindOrder ||
+			p.curr.Kind == lexer.KindSkip || p.curr.Kind == lexer.KindLimit ||
+			p.curr.Kind == lexer.KindWith || p.curr.Kind == lexer.KindMatch ||
+			p.curr.Kind == lexer.KindReturn || p.curr.Kind == lexer.KindEOF {
+			break
+		}
+		projection, err := p.parseProjection()
+		if err != nil {
+			return WithClause{}, fmt.Errorf("WITH projection: %w", err)
+		}
+		clause.Projections = append(clause.Projections, projection)
+		if p.curr.Kind != lexer.KindComma {
+			break
+		}
+		p.advance()
+	}
+	if len(clause.Projections) == 0 {
+		return WithClause{}, fmt.Errorf("WITH requires at least one projection")
+	}
+	if p.curr.Kind == lexer.KindWhere {
+		p.advance()
+		where, err := p.parseExpr(0)
+		if err != nil {
+			return WithClause{}, err
+		}
+		clause.Where = where
+	}
+	if p.curr.Kind == lexer.KindOrder {
+		p.advance()
+		if err := p.expect(lexer.KindBy); err != nil {
+			return WithClause{}, err
+		}
+		for {
+			expr, err := p.parseExpr(0)
+			if err != nil {
+				return WithClause{}, err
+			}
+			term := OrderTerm{Expr: expr}
+			if p.curr.Kind == lexer.KindDesc {
+				term.IsDesc = true
+				p.advance()
+			} else if p.curr.Kind == lexer.KindAsc {
+				p.advance()
+			}
+			clause.OrderTerms = append(clause.OrderTerms, term)
+			if len(clause.OrderTerms) == 1 {
+				clause.OrderBy = term.Expr
+			}
+			if p.curr.Kind != lexer.KindComma {
+				break
+			}
+			p.advance()
+		}
+	}
+	for p.curr.Kind == lexer.KindSkip || p.curr.Kind == lexer.KindLimit {
+		isSkip := p.curr.Kind == lexer.KindSkip
+		p.advance()
+		expr, err := p.parseExpr(0)
+		if err != nil {
+			return WithClause{}, fmt.Errorf("WITH %s: %w", map[bool]string{true: "SKIP", false: "LIMIT"}[isSkip], err)
+		}
+		if isSkip {
+			clause.Skip = expr
+		} else {
+			clause.Limit = expr
+		}
+	}
+	return clause, nil
 }
 
 // parseSessionSettingStmt parses the session-local controls supported by the
@@ -562,6 +718,15 @@ func (p *Parser) parseMergeStmt() (NodeRef, error) {
 		p.doc.MatchPaths[matchRef.ID].PathAliasEnd = pathAliasEnd
 	}
 	stmt := MergeStmt{ID: int32(len(p.doc.MergeStmts)), MatchPath: matchRef}
+	if p.curr.Kind == lexer.KindSet {
+		p.advance()
+		start := int32(len(p.doc.MergeAssignments))
+		if err := p.parseMergeAssignmentList(); err != nil {
+			return NodeRef{}, err
+		}
+		stmt.UniversalSetStart = start
+		stmt.UniversalSetCount = int32(len(p.doc.MergeAssignments)) - start
+	}
 	for p.curr.Kind == lexer.KindOn {
 		p.advance()
 		section := p.curr.Kind
@@ -574,27 +739,8 @@ func (p *Parser) parseMergeStmt() (NodeRef, error) {
 		}
 		p.advance()
 		start := int32(len(p.doc.MergeAssignments))
-		for {
-			// Parse only the assignment target. Using precedence zero would
-			// consume the following '=' as part of the expression, leaving no
-			// delimiter for MERGE's SET grammar.
-			column, err := p.parseExpr(operatorPrecedence(lexer.KindEquals))
-			if err != nil {
-				return NodeRef{}, fmt.Errorf("MERGE assignment target: %w", err)
-			}
-			if column.Kind != NodeKindIdentifier || p.curr.Kind != lexer.KindEquals {
-				return NodeRef{}, fmt.Errorf("MERGE SET requires alias.column = expression")
-			}
-			p.advance()
-			value, err := p.parseExpr(0)
-			if err != nil {
-				return NodeRef{}, fmt.Errorf("MERGE assignment value: %w", err)
-			}
-			p.doc.MergeAssignments = append(p.doc.MergeAssignments, MergeAssignment{Column: column, Value: value})
-			if p.curr.Kind != lexer.KindComma {
-				break
-			}
-			p.advance()
+		if err := p.parseMergeAssignmentList(); err != nil {
+			return NodeRef{}, err
 		}
 		count := int32(len(p.doc.MergeAssignments)) - start
 		if section == lexer.KindCreate {
@@ -607,9 +753,53 @@ func (p *Parser) parseMergeStmt() (NodeRef, error) {
 		if err := p.parseReturning(&stmt.Returning, &stmt.ReturningStar); err != nil {
 			return NodeRef{}, err
 		}
+	} else if p.curr.Kind == lexer.KindReturn {
+		p.advance()
+		if p.curr.Kind == lexer.KindAsterisk {
+			stmt.ReturningStar = true
+			p.advance()
+		} else {
+			for {
+				projection, projectionErr := p.parseProjection()
+				if projectionErr != nil {
+					return NodeRef{}, projectionErr
+				}
+				stmt.ReturningProjections = append(stmt.ReturningProjections, projection)
+				stmt.Returning = append(stmt.Returning, projection.Expr)
+				if p.curr.Kind != lexer.KindComma {
+					break
+				}
+				p.advance()
+			}
+		}
 	}
 	p.doc.MergeStmts = append(p.doc.MergeStmts, stmt)
 	return NodeRef{Kind: NodeKindMergeStmt, ID: stmt.ID}, nil
+}
+
+func (p *Parser) parseMergeAssignmentList() error {
+	for {
+		// Parse only the assignment target. Using precedence zero would consume
+		// the following '=' as part of the expression, leaving no delimiter for
+		// MERGE's SET grammar.
+		column, err := p.parseExpr(operatorPrecedence(lexer.KindEquals))
+		if err != nil {
+			return fmt.Errorf("MERGE assignment target: %w", err)
+		}
+		if column.Kind != NodeKindIdentifier || p.curr.Kind != lexer.KindEquals {
+			return fmt.Errorf("MERGE SET requires alias.column = expression")
+		}
+		p.advance()
+		value, err := p.parseExpr(0)
+		if err != nil {
+			return fmt.Errorf("MERGE assignment value: %w", err)
+		}
+		p.doc.MergeAssignments = append(p.doc.MergeAssignments, MergeAssignment{Column: column, Value: value})
+		if p.curr.Kind != lexer.KindComma {
+			return nil
+		}
+		p.advance()
+	}
 }
 
 func (p *Parser) advance() {
@@ -1116,6 +1306,9 @@ func (p *Parser) parseProjection() (Projection, error) {
 // isIdentifierLike returns true for tokens that can serve as column aliases
 // (identifiers and non-reserved keywords).
 func isIdentifierLike(k lexer.Kind) bool {
+	if k == lexer.KindDetach || k == lexer.KindSkip {
+		return false
+	}
 	return k == lexer.KindIdentifier || k >= lexer.KindSelect
 }
 
@@ -2018,7 +2211,7 @@ func (p *Parser) parseExpr(precedence int) (NodeRef, error) {
 		left = NodeRef{Kind: NodeKindGraphMetric, ID: gm.ID}
 		p.doc.GraphMetrics = append(p.doc.GraphMetrics, gm)
 
-	case lexer.KindSimilarity, lexer.KindVectorDistance:
+	case lexer.KindSimilarity, lexer.KindVectorDistance, lexer.KindArrayCosineSimilarity:
 		// Function names are legal SELECT aliases (for example
 		// ORDER BY similarity). Treat the keyword as an identifier unless it
 		// is actually followed by a call parenthesis.
@@ -2033,7 +2226,7 @@ func (p *Parser) parseExpr(precedence int) (NodeRef, error) {
 			p.advance()
 			break
 		}
-		isSim := p.curr.Kind == lexer.KindSimilarity
+		isSim := p.curr.Kind == lexer.KindSimilarity || p.curr.Kind == lexer.KindArrayCosineSimilarity
 		p.advance()
 		if err := p.expect(lexer.KindLeftParen); err != nil {
 			return NodeRef{}, err
@@ -2355,40 +2548,53 @@ func (p *Parser) parseExpr(precedence int) (NodeRef, error) {
 			left = NodeRef{Kind: NodeKindBetweenExpr, ID: bw.ID}
 
 		case lexer.KindIn:
-			if err := p.expect(lexer.KindLeftParen); err != nil {
-				return NodeRef{}, err
-			}
 			inNode := InExpr{
 				ID:        int32(len(p.doc.InExprs)),
 				Expr:      left,
 				ListStart: int32(len(p.doc.Nodes)),
 				Not:       isNot,
 			}
-			if p.curr.Kind == lexer.KindSelect {
-				stmtRef, err := p.parseSelectStmt()
-				if err != nil {
-					return NodeRef{}, fmt.Errorf("IN subquery: %w", err)
-				}
-				inNode.Subquery = NodeRef{Kind: NodeKindSubqueryExpr, ID: int32(len(p.doc.SubqueryExprs))}
-				inNode.HasSubquery = true
-				p.doc.SubqueryExprs = append(p.doc.SubqueryExprs, SubqueryExpr{ID: inNode.Subquery.ID, Stmt: stmtRef})
-			} else {
-				for p.curr.Kind != lexer.KindEOF && p.curr.Kind != lexer.KindRightParen {
-					listItem, err := p.parseExpr(0)
+			if p.curr.Kind == lexer.KindLeftParen {
+				p.advance()
+				if p.curr.Kind == lexer.KindSelect {
+					stmtRef, err := p.parseSelectStmt()
 					if err != nil {
-						return NodeRef{}, err
+						return NodeRef{}, fmt.Errorf("IN subquery: %w", err)
 					}
-					p.doc.Nodes = append(p.doc.Nodes, listItem)
-					inNode.ListCount++
-					if p.curr.Kind == lexer.KindComma {
-						p.advance()
-					} else {
-						break
+					inNode.Subquery = NodeRef{Kind: NodeKindSubqueryExpr, ID: int32(len(p.doc.SubqueryExprs))}
+					inNode.HasSubquery = true
+					p.doc.SubqueryExprs = append(p.doc.SubqueryExprs, SubqueryExpr{ID: inNode.Subquery.ID, Stmt: stmtRef})
+				} else {
+					for p.curr.Kind != lexer.KindEOF && p.curr.Kind != lexer.KindRightParen {
+						listItem, err := p.parseExpr(0)
+						if err != nil {
+							return NodeRef{}, err
+						}
+						p.doc.Nodes = append(p.doc.Nodes, listItem)
+						inNode.ListCount++
+						if p.curr.Kind == lexer.KindComma {
+							p.advance()
+						} else {
+							break
+						}
 					}
 				}
-			}
-			if err := p.expect(lexer.KindRightParen); err != nil {
-				return NodeRef{}, err
+				if err := p.expect(lexer.KindRightParen); err != nil {
+					return NodeRef{}, err
+				}
+			} else {
+				// Cypher permits a list-valued parameter without wrapping it in
+				// parentheses: `x IN $values`. Parse one RHS expression at the
+				// current precedence so a following AND/OR remains outside IN.
+				paramRef, err := p.parseExpr(prec)
+				if err != nil {
+					return NodeRef{}, fmt.Errorf("IN parameter: %w", err)
+				}
+				if paramRef.Kind != NodeKindIdentifier {
+					return NodeRef{}, fmt.Errorf("IN expects a list parameter")
+				}
+				inNode.IsParam = true
+				inNode.ParamRef = paramRef
 			}
 			p.doc.InExprs = append(p.doc.InExprs, inNode)
 			left = NodeRef{Kind: NodeKindInExpr, ID: inNode.ID}

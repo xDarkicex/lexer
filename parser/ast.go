@@ -37,6 +37,7 @@ const (
 	NodeKindMergeStmt
 	NodeKindPatternComprehension
 	NodeKindShortestPath
+	NodeKindDeleteStmt
 )
 
 const (
@@ -105,6 +106,7 @@ type QueryDoc struct {
 	InsertGraphEdgeStmts []InsertGraphEdgeStmt
 	UpdateStmts          []UpdateStmt
 	DeleteStmts          []DeleteStmt
+	WithClauses          []WithClause
 
 	// Aggregate / Subquery / DDL
 	AggregateExprs      []AggregateExpr
@@ -241,10 +243,34 @@ type SelectStmt struct {
 	SetOp      SetOperation
 	SetOpAll   bool
 	// CTE fields — populated when WITH precedes SELECT.
-	CTEsStart       int32 // Index into QueryDoc.CTEs
-	CTEsCount       int32
+	CTEsStart int32 // Index into QueryDoc.CTEs
+	CTEsCount int32
+	// PipeWithStart/PipeWithCount identify mid-query Cypher WITH clauses.
+	// Top-level SQL CTEs continue to use CTEsStart/CTEsCount.
+	PipeWithStart   int32
+	PipeWithCount   int32
 	WindowDefsStart int32
 	WindowDefsCount int32
+}
+
+// WithClause represents a mid-query Cypher WITH projection boundary. It
+// reuses the normal Projection shape so aliases and expression nodes retain
+// the same source-offset and evaluation semantics as SELECT projections.
+type WithClause struct {
+	ID          int32
+	Distinct    bool
+	Projections []Projection
+	Where       NodeRef
+	OrderBy     NodeRef
+	OrderTerms  []OrderTerm
+	Skip        NodeRef
+	Limit       NodeRef
+	// MatchPath is populated when this WITH is followed by another native
+	// Cypher MATCH. MatchWhere is the predicate attached to that MATCH.
+	// Keeping the path on the pipeline clause preserves the binding boundary:
+	// the next MATCH can consume the rows materialized by this WITH.
+	MatchPath  NodeRef
+	MatchWhere NodeRef
 }
 
 // OrderTerm is one expression and direction in a SELECT ORDER BY list.
@@ -426,6 +452,13 @@ type DeleteStmt struct {
 	WhereExpr     NodeRef
 	Returning     []NodeRef // RETURNING column list
 	ReturningStar bool      // RETURNING *
+	// Cypher is true for MATCH ... [DETACH] DELETE ... statements. The
+	// relational DELETE fields above remain unchanged for SQL DML.
+	Cypher    bool
+	Detach    bool
+	MatchPath NodeRef
+	Targets   []NodeRef
+	Limit     NodeRef
 }
 
 // Projection is a single item in a SELECT list.
@@ -535,14 +568,17 @@ type ShortestPathExpr struct {
 // pattern is a MatchPath; ON CREATE/ON MATCH assignments reuse the ordinary
 // expression arena and are applied atomically by the database executor.
 type MergeStmt struct {
-	ID            int32
-	MatchPath     NodeRef
-	OnCreateStart int32
-	OnCreateCount int32
-	OnMatchStart  int32
-	OnMatchCount  int32
-	Returning     []NodeRef
-	ReturningStar bool
+	ID                   int32
+	MatchPath            NodeRef
+	UniversalSetStart    int32
+	UniversalSetCount    int32
+	OnCreateStart        int32
+	OnCreateCount        int32
+	OnMatchStart         int32
+	OnMatchCount         int32
+	Returning            []NodeRef
+	ReturningStar        bool
+	ReturningProjections []Projection
 }
 
 type MergeAssignment struct {
@@ -609,6 +645,11 @@ type InExpr struct {
 	Subquery    NodeRef
 	HasSubquery bool
 	Not         bool
+	// IsParam is true for Cypher-style `expr IN $param`, where the bound
+	// parameter must contain a list. ParamRef points at the named parameter
+	// expression and is intentionally separate from the literal-list arena.
+	IsParam  bool
+	ParamRef NodeRef
 }
 
 type UnaryExpr struct {
@@ -617,7 +658,7 @@ type UnaryExpr struct {
 	Operator uint8
 }
 
-// VectorFunc represents SIMILARITY() or VECTOR_DISTANCE().
+// VectorFunc represents SIMILARITY(), ARRAY_COSINE_SIMILARITY(), or VECTOR_DISTANCE().
 type VectorFunc struct {
 	ID       int32
 	IsMaxSim bool    // true for SIMILARITY, false for VECTOR_DISTANCE
@@ -969,6 +1010,7 @@ func (d *QueryDoc) Reset() {
 	d.InsertGraphEdgeStmts = d.InsertGraphEdgeStmts[:0]
 	d.UpdateStmts = d.UpdateStmts[:0]
 	d.DeleteStmts = d.DeleteStmts[:0]
+	d.WithClauses = d.WithClauses[:0]
 	d.AggregateExprs = d.AggregateExprs[:0]
 	d.SubqueryExprs = d.SubqueryExprs[:0]
 	d.CreateTableStmts = d.CreateTableStmts[:0]

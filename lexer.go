@@ -103,6 +103,7 @@ const (
 	// Vector/ML Keywords
 	KindVectorDistance
 	KindSimilarity
+	KindArrayCosineSimilarity
 	KindGraphCentrality
 
 	// CRUD Keywords
@@ -213,6 +214,8 @@ const (
 	KindReturn       // RETURN
 	KindShortestPath // shortestPath(...)
 	KindPipe         // | (pattern-comprehension projection separator)
+	KindDetach       // DETACH
+	KindSkip         // SKIP
 )
 
 // Token is a single lexer emission (iterator pattern).
@@ -619,7 +622,7 @@ func (s *Scanner) Next() (Token, bool) {
 	kind := KindIdentifier
 
 	// We check exact byte length first to avoid unnecessary string conversions or slow checks
-	if length >= 2 && length <= 16 {
+	if length >= 2 && length <= 23 {
 		// Exact length switches
 		switch length {
 		case 2:
@@ -705,6 +708,8 @@ func (s *Scanner) Next() (Token, bool) {
 				kind = KindElse
 			} else if caseInsensitiveMatch(s.src[start:start+4], "like") {
 				kind = KindLike
+			} else if caseInsensitiveMatch(s.src[start:start+4], "skip") {
+				kind = KindSkip
 			}
 		case 5:
 			if caseInsensitiveMatch(s.src[start:start+5], "where") {
@@ -787,6 +792,8 @@ func (s *Scanner) Next() (Token, bool) {
 				kind = KindExcept
 			} else if caseInsensitiveMatch(s.src[start:start+6], "return") {
 				kind = KindReturn
+			} else if caseInsensitiveMatch(s.src[start:start+6], "detach") {
+				kind = KindDetach
 			}
 		case 7:
 			if caseInsensitiveMatch(s.src[start:start+7], "between") {
@@ -865,6 +872,10 @@ func (s *Scanner) Next() (Token, bool) {
 		case 16:
 			if caseInsensitiveMatch(s.src[start:start+16], "graph_centrality") {
 				kind = KindGraphCentrality
+			}
+		case 23:
+			if caseInsensitiveMatch(s.src[start:start+23], "array_cosine_similarity") {
+				kind = KindArrayCosineSimilarity
 			}
 		}
 	}

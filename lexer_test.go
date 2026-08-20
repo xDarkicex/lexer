@@ -40,6 +40,14 @@ func TestScanner(t *testing.T) {
 			},
 		},
 		{
+			name:  "Array cosine similarity",
+			input: "array_cosine_similarity(v, q)",
+			expected: []Kind{
+				KindArrayCosineSimilarity, KindLeftParen, KindIdentifier, KindComma,
+				KindWhitespace, KindIdentifier, KindRightParen, KindEOF,
+			},
+		},
+		{
 			name:  "Explicit ascending order",
 			input: "ORDER BY score ASC LIMIT 5",
 			expected: []Kind{
