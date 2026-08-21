@@ -146,6 +146,22 @@ func TestGraphitiCypherClauseAdditions(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "disconnected matches before merge",
+			sql: `MATCH (source:Entity {uuid: $source_uuid})
+MATCH (target:Entity {uuid: $target_uuid})
+MERGE (source)-[:RELATES_TO]->(e:RelatesToNode_ {uuid: $uuid})-[:RELATES_TO]->(target)
+SET e.fact = $fact
+RETURN e.uuid AS uuid`,
+			check: func(t *testing.T, doc *QueryDoc) {
+				if len(doc.MergeStmts) != 1 {
+					t.Fatalf("merge statements=%d, want 1", len(doc.MergeStmts))
+				}
+				if got := len(doc.MergeStmts[0].PrefixMatchPaths); got != 2 {
+					t.Fatalf("prefix match paths=%d, want 2: %#v", got, doc.MergeStmts[0])
+				}
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

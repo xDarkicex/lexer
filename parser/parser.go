@@ -270,6 +270,32 @@ func (p *Parser) parseCypherMatchStmt() (NodeRef, error) {
 		p.doc.MatchPaths[matchRef.ID].PathAliasEnd = pathAliasEnd
 	}
 
+	// Graphiti's Kuzu edge-save form binds existing endpoints with separate
+	// MATCH clauses before introducing the intermediate node and relationship
+	// structure with MERGE. Preserve those paths on the MergeStmt so the
+	// executor can resolve the aliases without silently creating endpoints.
+	if p.curr.Kind == lexer.KindMerge || p.curr.Kind == lexer.KindMatch {
+		prefixMatches := []NodeRef{matchRef}
+		for p.curr.Kind == lexer.KindMatch {
+			p.advance()
+			prefix, prefixErr := p.parseMatchPath()
+			if prefixErr != nil {
+				return NodeRef{}, fmt.Errorf("MATCH before MERGE: %w", prefixErr)
+			}
+			prefixMatches = append(prefixMatches, prefix)
+		}
+		if p.curr.Kind == lexer.KindMerge {
+			mergeRef, mergeErr := p.parseMergeStmt()
+			if mergeErr != nil {
+				return NodeRef{}, mergeErr
+			}
+			if mergeRef.ID >= 0 && int(mergeRef.ID) < len(p.doc.MergeStmts) {
+				p.doc.MergeStmts[mergeRef.ID].PrefixMatchPaths = prefixMatches
+			}
+			return mergeRef, nil
+		}
+	}
+
 	stmt := SelectStmt{
 		ID:          int32(len(p.doc.SelectStmts)),
 		SourceStart: sourceStart,

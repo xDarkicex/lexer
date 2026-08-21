@@ -568,8 +568,13 @@ type ShortestPathExpr struct {
 // pattern is a MatchPath; ON CREATE/ON MATCH assignments reuse the ordinary
 // expression arena and are applied atomically by the database executor.
 type MergeStmt struct {
-	ID                   int32
-	MatchPath            NodeRef
+	ID        int32
+	MatchPath NodeRef
+	// PrefixMatchPaths contains disconnected native Cypher MATCH patterns
+	// that bind aliases before the MERGE pattern. They are used by Graphiti's
+	// Kuzu-shaped edge-save queries and must resolve existing endpoints before
+	// the MERGE executor is allowed to create intermediate vertices.
+	PrefixMatchPaths     []NodeRef
 	UniversalSetStart    int32
 	UniversalSetCount    int32
 	OnCreateStart        int32
